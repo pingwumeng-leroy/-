@@ -62,17 +62,27 @@ sudo nginx -t && sudo systemctl reload nginx
 
 `nginx.conf.example` 已配置 `client_max_body_size 1024m`（口播视频上传）与 `proxy_read_timeout 600s`（剪辑任务耗时）。域名解析到服务器后，建议用 certbot 签证书。
 
-### 私有仓库 clone 的认证
+### 获取代码：clone 或代码包
 
-仓库是私有的，GitHub 自 2021 年起不接受账号密码登录。要在服务器上 `git clone`，先在 GitHub → Settings → Developer settings → Personal access tokens 建一个 **Fine-grained token**，只勾这一个仓库的 `Contents: Read`：
+仓库是 **Public**，服务器上直接 clone 即可，不需要任何凭证：
 
 ```bash
-git clone https://pingwumeng-leroy:<PAT>@github.com/pingwumeng-leroy/-.git /opt/douyin-studio
+cd /opt
+git clone https://github.com/pingwumeng-leroy/-.git douyin-studio
 ```
 
-不带 Token 直接 clone 会提示输入 Username / Password，填账号密码必然失败（报 `Authentication failed`）。嫌麻烦就直接用 `douyin-studio.tar.gz` 代码包，内容完全一致，也不需要任何凭证。
+> `/opt` 属主是 root，普通用户不能在其中新建目录。若报 `could not create work tree dir ... Permission denied`，先执行
+> `sudo mkdir -p /opt/douyin-studio && sudo chown -R "$(id -un):$(id -gn)" /opt/douyin-studio`，
+> 再重跑上面的 clone（git 允许 clone 进已存在的空目录）。
 
-> Token 会留在命令行历史里，用完建议 `history -d` 清掉，或改用 deploy key / `git credential` 缓存。
+不想用 git，也可以用 `douyin-studio.tar.gz` 代码包，内容完全一致：
+
+```bash
+sudo mkdir -p /opt/douyin-studio && sudo chown -R "$(id -un):$(id -gn)" /opt/douyin-studio
+tar -xzf douyin-studio.tar.gz -C /opt/douyin-studio
+```
+
+> **仓库公开后尤其注意**：`config/settings.json`、`data/`、`*.db` 已被 `.gitignore` 排除，其中会存 TikHub Token、访问密码和抖音 Cookie。任何情况下都不要用 `git add -f` 把它们提交上去——一旦 push 就是公开泄露。
 
 ## 配置说明
 
