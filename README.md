@@ -30,13 +30,25 @@ sudo apt install -y ffmpeg fonts-noto-cjk   # 剪辑与中文渲染依赖
 
 ```bash
 sudo apt install -y python3-venv ffmpeg fonts-noto-cjk
-sudo mkdir -p /opt/douyin-studio
-sudo tar -xzf douyin-studio.tar.gz -C /opt/douyin-studio   # 或 git clone
-cd /opt/douyin-studio
 
+# /opt 属主是 root，普通用户不能在里面建目录：先建好，再把属主改成自己
+sudo mkdir -p /opt/douyin-studio
+sudo chown -R "$(id -un):$(id -gn)" /opt/douyin-studio
+
+# 方式 A｜代码包（最省事，不需要 GitHub 凭证）
+tar -xzf douyin-studio.tar.gz -C /opt/douyin-studio
+
+# 方式 B｜从私有仓库 clone（需要 PAT，见下一节；目标目录必须为空）
+# git clone https://pingwumeng-leroy:<PAT>@github.com/pingwumeng-leroy/-.git /opt/douyin-studio
+
+cd /opt/douyin-studio
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 cp config/settings.example.json config/settings.json       # 不复制也行，首启自动生成
+
+# systemd 以 www-data 运行，只有 data/ 需要写权限（SQLite / 上传 / 成片）
+sudo mkdir -p data
+sudo chown -R www-data:www-data data
 
 sudo cp deploy/douyin-studio.service /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -49,6 +61,18 @@ sudo nginx -t && sudo systemctl reload nginx
 ```
 
 `nginx.conf.example` 已配置 `client_max_body_size 1024m`（口播视频上传）与 `proxy_read_timeout 600s`（剪辑任务耗时）。域名解析到服务器后，建议用 certbot 签证书。
+
+### 私有仓库 clone 的认证
+
+仓库是私有的，GitHub 自 2021 年起不接受账号密码登录。要在服务器上 `git clone`，先在 GitHub → Settings → Developer settings → Personal access tokens 建一个 **Fine-grained token**，只勾这一个仓库的 `Contents: Read`：
+
+```bash
+git clone https://pingwumeng-leroy:<PAT>@github.com/pingwumeng-leroy/-.git /opt/douyin-studio
+```
+
+不带 Token 直接 clone 会提示输入 Username / Password，填账号密码必然失败（报 `Authentication failed`）。嫌麻烦就直接用 `douyin-studio.tar.gz` 代码包，内容完全一致，也不需要任何凭证。
+
+> Token 会留在命令行历史里，用完建议 `history -d` 清掉，或改用 deploy key / `git credential` 缓存。
 
 ## 配置说明
 
