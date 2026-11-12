@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>合胜宏 · 抖音内容工作台</title>
+<link rel="stylesheet" href="/static/style.css"/>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <div class="logo">合</div>
+    <div>
+      <h1>抖音内容工作台</h1>
+      <p id="brandSub">四川合胜宏科技集团有限公司</p>
+    </div>
+  </div>
+  <div class="topright">
+    <span id="engineBadge" class="badge">检测中</span>
+    <button class="btn ghost" onclick="openSettings()">⚙ 设置</button>
+  </div>
+</header>
+
+<nav class="steps" id="steps">
+  <a class="step active" data-target="s1"><i>1</i><span>找素材</span></a>
+  <a class="step" data-target="s2"><i>2</i><span>看分析</span></a>
+  <a class="step" data-target="s3"><i>3</i><span>出文案</span></a>
+  <a class="step" data-target="s4"><i>4</i><span>拍口播</span></a>
+  <a class="step" data-target="s5"><i>5</i><span>剪成片</span></a>
+</nav>
+
+<main>
+<!-- ============ 步骤 1 ============ -->
+<section class="card active" id="s1">
+  <div class="cardhead">
+    <div><h2><em>01</em> 找素材</h2><p>把同行视频下载下来，或直接上传你已有的视频文件</p></div>
+    <span class="count" id="nVideos">0 条素材</span>
+  </div>
+
+  <div class="two-col">
+    <div class="panel">
+      <h3>方式 A · 抖音链接</h3>
+      <label>粘贴分享链接</label>
+      <input id="dyUrl" placeholder="https://v.douyin.com/… 或完整视频链接"/>
+      <label>浏览器 Cookie（可选，采集失败时再填）</label>
+      <textarea id="dyCookie" rows="2" placeholder="从浏览器开发者工具复制 Cookie；留空也能试"></textarea>
+      <button class="btn primary" onclick="fetchDouyin()" id="btnFetch">采集这条视频</button>
+      <p class="tip">抖音有反爬，采集失败很正常 —— 用右边「上传本地视频」一样能跑完整流程。</p>
+    </div>
+    <div class="panel">
+      <h3>方式 B · 上传视频文件</h3>
+      <p class="muted">把同行的口播视频保存到电脑后拖进来。上传后记得点「补文案 / 分析」。</p>
+      <div class="drop" id="dropSrc" onclick="document.getElementById('fileSrc').click()">
+        <b>点击选择视频</b><span>mp4 / mov / mkv / webm</span>
+      </div>
+      <input type="file" id="fileSrc" accept="video/*" hidden/>
+    </div>
+  </div>
+
+  <div class="list" id="videoList"></div>
+</section>
+
+<!-- ============ 步骤 2 ============ -->
+<section class="card" id="s2">
+  <div class="cardhead">
+    <div><h2><em>02</em> 看分析报告 · 经验库</h2><p>AI 把视频拆成结构、痛点、可复用模式，存进数据库，越攒越值钱</p></div>
+    <span class="count" id="nReports">0 份报告</span>
+  </div>
+
+  <div class="panel harvest">
+    <h3>批量采集报告 <span class="mini" id="providerBadge">数据源：检测中</span></h3>
+    <label>老板输入一段文字（选题 / 关键词 / 用户常搜的词）</label>
+    <textarea id="hvText" rows="2" placeholder="例：成都公司注销为什么有人跑三趟还没办完"></textarea>
+    <div class="grid3">
+      <div><label>要几份报告</label><input id="hvCount" type="number" value="15" min="1" max="50"/></div>
+      <div><label>时间范围</label><select id="hvDays">
+        <option value="180">近半年</option><option value="7">近一周</option>
+        <option value="1">近一天</option><option value="0">不限</option></select></div>
+      <div><label>数据源</label><select id="hvProvider"></select></div>
+    </div>
+    <div class="row">
+      <button class="btn primary" onclick="startHarvest()" id="btnHarvest">一键采集并分析</button>
+      <button class="btn" onclick="loadHarvestJobs()">刷新任务</button>
+      <span class="tip" style="margin:0">未配 TikHub Key 时用演示数据跑通全链路，报告会标注来源</span>
+    </div>
+    <div id="hvStatus" class="renderbox">还没有采集任务</div>
+  </div>
+
+  <div class="panel slim">
+    <div class="row">
+      <input id="manualTopic" placeholder="手动补一条经验：选题（如 工商注销）" style="flex:1"/>
+      <input id="manualPattern" placeholder="可复用结构模式（一句话）" style="flex:2"/>
+      <button class="btn" onclick="addManualReport()">存入经验库</button>
+    </div>
+    <p class="tip">没有视频素材也能先手工补经验，第 3 步照样能生成文案。</p>
+  </div>
+  <h3 class="sub">采集任务历史</h3>
+  <div class="list" id="harvestList"></div>
+  <h3 class="sub">分析报告 · 经验库</h3>
+  <div class="list" id="reportList"></div>
+</section>
+
+<!-- ============ 步骤 3 ============ -->
+<section class="card" id="s3">
+  <div class="cardhead">
+    <div><h2><em>03</em> 生成口播文案</h2><p>系统根据经验库里的所有报告，按你的要求写一份全新原创稿</p></div>
+    <span class="count" id="nScripts">0 份文案</span>
+  </div>
+
+  <div class="two-col">
+    <div class="panel">
+      <h3>告诉系统你要什么</h3>
+      <label>选题</label>
+      <select id="reqTopic">
+        <option value="">从经验库自动挑</option>
+        <option>工商注销</option><option>税务异常</option><option>代理记账</option>
+        <option>注册公司</option><option>汇算清缴</option><option>税收优惠</option>
+        <option>发票业务</option><option>公司变更</option><option>理账补账</option>
+        <option>审计报告</option><option>财税合规</option><option>社保开户</option>
+      </select>
+      <div class="grid3">
+        <div><label>地域</label><input id="reqCity" value="成都"/></div>
+        <div><label>时长（秒）</label><input id="reqSeconds" type="number" value="60"/></div>
+        <div><label>开场风格</label><select id="reqHook"><option value="">自动</option><option value="提问式">提问式</option><option value="反常识">反常识</option></select></div>
+      </div>
+      <label>必须讲到的要点</label>
+      <textarea id="reqPoints" rows="2" placeholder="例：强调先查状态再补材料，别一上来就去窗口"></textarea>
+      <label>想带出的业务（可选）</label>
+      <input id="reqBusiness" placeholder="例：代理记账年单"/>
+      <label>结尾引导</label>
+      <input id="reqCta" value="评论区说说你的情况，我帮你判断卡在哪一步"/>
+      <button class="btn primary big" onclick="genScript()" id="btnGen">生成全新文案</button>
+    </div>
+
+    <div class="panel">
+      <h3>文案编辑台 <span class="mini" id="scriptMeta"></span></h3>
+      <label>标题（观众第一眼看到）</label>
+      <input id="scTitle" placeholder="生成后自动填入"/>
+      <label>口播正文（可直接改，按行分段 = 换气点）</label>
+      <textarea id="scBody" rows="14" placeholder="点左边「生成全新文案」，内容会出现在这里；改完记得保存"></textarea>
+      <div class="row">
+        <button class="btn" onclick="saveScript()" id="btnSaveScript" disabled>保存修改</button>
+        <button class="btn" onclick="checkScript()">合规检查</button>
+        <button class="btn" onclick="copyScript()">复制文案</button>
+        <button class="btn accent" onclick="finalizeScript()" id="btnFinal" disabled>✅ 定稿，去拍摄</button>
+      </div>
+      <div id="sensitiveBox"></div>
+      <div id="keywordsBox" class="tip"></div>
+    </div>
+  </div>
+
+  <div class="list" id="scriptList"></div>
+</section>
+
+<!-- ============ 步骤 4 ============ -->
+<section class="card" id="s4">
+  <div class="cardhead">
+    <div><h2><em>04</em> 拍口播 &amp; 上传</h2><p>照着定稿文案念一遍，用手机竖着拍，把原片传上来就行</p></div>
+  </div>
+  <div class="two-col">
+    <div class="panel">
+      <h3>拍摄用的定稿文案</h3>
+      <label>选择文案</label>
+      <select id="shootScript" onchange="showShootScript()"></select>
+      <div class="scriptpaper" id="shootPaper">请先在第 3 步定稿一份文案。</div>
+      <button class="btn" onclick="copyShoot()">复制全文去提词器</button>
+    </div>
+    <div class="panel">
+      <h3>上传口播原片</h3>
+      <div class="drop" id="dropTalk" onclick="document.getElementById('fileTalk').click()">
+        <b>点击选择刚拍好的视频</b><span>竖屏 9:16 效果最好，横屏也会自动补成竖屏</span>
+      </div>
+      <input type="file" id="fileTalk" accept="video/*" hidden/>
+      <div id="talkInfo" class="tip"></div>
+      <button class="btn primary big" onclick="gotoStep('s5')">下一步：一键剪辑 →</button>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 步骤 5 ============ -->
+<section class="card" id="s5">
+  <div class="cardhead">
+    <div><h2><em>05</em> 自动剪辑出片</h2><p>模板自动加片头、字幕、水印、片尾，统一成抖音竖屏，直接下载发</p></div>
+    <span class="count" id="nJobs">0 个任务</span>
+  </div>
+  <div class="two-col">
+    <div class="panel">
+      <h3>选择模板并开始</h3>
+      <label>剪辑模板</label>
+      <select id="tplSelect"></select>
+      <div id="tplDesc" class="tip"></div>
+      <div class="grid3">
+        <div><label>裁掉开头(秒)</label><input id="ovTrimHead" type="number" step="0.1" value="0"/></div>
+        <div><label>裁掉结尾(秒)</label><input id="ovTrimTail" type="number" step="0.1" value="0"/></div>
+        <div><label>语速</label><input id="ovSpeed" type="number" step="0.05" value="1"/></div>
+      </div>
+      <p class="tip">改了上面数值会临时覆盖模板参数（不保存）。字幕按文案自动分句烧录。</p>
+      <button class="btn primary big" onclick="startRender()" id="btnRender">开始自动剪辑</button>
+      <div id="renderStatus" class="renderbox">等待任务</div>
+    </div>
+    <div class="panel">
+      <h3>成片预览</h3>
+      <div class="preview" id="previewBox"><span>剪辑完成后这里可以直接播放</span></div>
+      <a id="downloadBtn" class="btn accent big hidden" href="#">⬇ 下载成片</a>
+    </div>
+  </div>
+  <h3 class="sub">历史任务</h3>
+  <div class="list" id="jobList"></div>
+</section>
+</main>
+
+<!-- ============ 设置抽屉 ============ -->
+<div class="mask hidden" id="mask" onclick="closeSettings()"></div>
+<aside class="drawer" id="drawer">
+  <div class="drawerhead"><h2>⚙ 系统设置</h2><button class="x" onclick="closeSettings()">×</button></div>
+  <div class="drawerbody">
+    <div class="notice">
+      <b>不填也能用。</b> 现在全流程由内置引擎跑通；填了下面接口，分析和文案会换成你自己的 AI 服务，出片环节不受影响。
+    </div>
+
+    <details class="help">
+      <summary>使用说明 · 五步怎么用（给老板看）</summary>
+      <ol>
+        <li><b>找素材</b>：贴同行抖音分享链接点「采集」，或把已下载的视频直接上传。抖音反爬导致采集失败很常见，改用上传一样能跑通全流程。</li>
+        <li><b>补文案 → 分析</b>：点素材行的「补文案」，粘贴同行口播文字最准（也可传 .srt/.txt）；再点「分析 →」，结构化报告自动进经验库。</li>
+        <li><b>出文案</b>：填选题 / 地域 / 时长 → 生成 → 可直接改 → 合规检查 → 点「定稿，去拍摄」。经验库越攒越厚，出稿越贴实际。</li>
+        <li><b>拍口播</b>：复制定稿文案进提词器，手机竖屏念一遍，把原片传上来即可。</li>
+        <li><b>剪成片</b>：选模板 → 开始自动剪辑 → 右侧直接预览 → 下载发抖音。片头、字幕、水印、片尾、竖屏统一都是模板自动完成的。</li>
+      </ol>
+    </details>
+
+    <details class="help">
+      <summary>运维速查 · 部署 / 配置 / 排错</summary>
+      <ul>
+        <li><b>启动</b>：<code>cd /workspace/douyin-studio &amp;&amp; PORT=8080 python3 app.py</code>，浏览器访问 <code>http://服务器IP:8080</code>。内部几个人用，自带多线程模式足够；健康检查 <code>/healthz</code>。</li>
+        <li><b>依赖</b>：Python 3.11 + flask / Pillow / yt-dlp；系统要有 ffmpeg、ffprobe 和中文字体 <code>fonts-noto-cjk</code>（字幕与片头卡片靠它，缺了会显示方框）。</li>
+        <li><b>配置文件</b>：<code>config/settings.json</code> 接口开关（也可在本页改）、<code>config/edit_templates.json</code> 剪辑模板、<code>config/sensitive_words.txt</code> 一行一个敏感词、<code>config/generate_prompt.txt</code> 业务边界补充规则。改完刷新页面生效。</li>
+        <li><b>数据与备份</b>：全部业务数据在 <code>data/studio.db</code> 一个 SQLite 文件里，复制它即备份；素材与成片在 <code>data/uploads/</code>、<code>data/outputs/</code>，建议一起打包。上传上限 1GB。</li>
+        <li><b>没有 AI 接口</b>：分析与文案由内置规则引擎跑，全流程可用，顶部显示「内置引擎模式」；填入 OpenAI 兼容接口后才切换成自有 AI，剪辑环节始终不受影响。</li>
+        <li><b>批量采集报告</b>：第 2 步输入一段文字即可一键采报告。默认 <code>mock</code> 演示数据源，不联网不花钱；在下面切到 <code>tikhub</code> 并填 Key 后换成真实抖音数据，代码零改动。报告都进同一张 <code>reports</code> 表，第 3 步生成文案直接可用；演示数据会带来源标记，不会冒充真实采集结果。</li>
+        <li><b>抖音采集失败</b>：先在下面填浏览器 Cookie；仍失败就直接上传本地视频，后续环节完全相同。</li>
+        <li><b>剪辑失败</b>：看第 5 步任务日志，多数是源视频无音轨或编码异常，用 ffmpeg 转成标准 mp4（H.264 + AAC）再传。</li>
+        <li><b>安全</b>：默认无访问密码，<b>仅限内网</b>。要放公网必须先开启下面的「访问密码」并挂 HTTPS 反向代理；API Key 只存服务器配置文件，页面不回传明文。</li>
+        <li><b>合规</b>：系统内置敏感词检查，但发布前仍需人工过一遍；「地址托管」等平台禁限业务不得在内容里宣传，只可线下承接。</li>
+      </ul>
+    </details>
+
+    <h3>大模型接口（分析 + 写文案）</h3>
+    <label>启用</label>
+    <select id="setLlmEnabled"><option value="false">关闭（用内置引擎）</option><option value="true">启用</option></select>
+    <label>Base URL（OpenAI 兼容）</label>
+    <input id="setLlmUrl" placeholder="https://api.openai.com/v1"/>
+    <label>API Key</label>
+    <input id="setLlmKey" type="password" placeholder="sk-…"/>
+    <label>模型名</label>
+    <input id="setLlmModel" placeholder="gpt-4o-mini"/>
+
+    <h3>语音转写接口（可选）</h3>
+    <label>启用</label>
+    <select id="setAsrEnabled"><option value="false">关闭（手动补文案 / 上传字幕）</option><option value="true">启用</option></select>
+    <label>Base URL</label>
+    <input id="setAsrUrl" placeholder="https://api.openai.com/v1"/>
+    <label>API Key</label>
+    <input id="setAsrKey" type="password"/>
+    <label>模型名</label>
+    <input id="setAsrModel" placeholder="whisper-1"/>
+
+    <h3>抖音采集</h3>
+    <label>默认 Cookie（可留空）</label>
+    <textarea id="setCookie" rows="3"></textarea>
+
+    <h3>数据源 · 批量采集报告</h3>
+    <label>默认数据源</label>
+    <select id="setProvider">
+      <option value="mock">演示数据（不联网，不花钱）</option>
+      <option value="tikhub">TikHub（真实抖音数据）</option>
+    </select>
+    <label>TikHub Base URL</label>
+    <input id="setTikhubUrl" placeholder="https://api.tikhub.io"/>
+    <label>TikHub API Key</label>
+    <input id="setTikhubKey" type="password" placeholder="Bearer Token"/>
+    <label>单次调用预算上限</label>
+    <input id="setMaxCalls" type="number" value="60"/>
+    <p class="tip">Key 只存在服务器 <code>config/settings.json</code>，页面不回传明文。切到 TikHub 前需验证邮箱并充值，否则返回 403 / 402；失败会自动降级到演示数据。</p>
+
+    <h3>同行种子账号（补充通道）</h3>
+    <label>批量导入，每行一条：昵称 | 主页链接 | sec_user_id | 分类</label>
+    <textarea id="seedBatch" rows="3" placeholder="成都企服老周|https://www.douyin.com/user/...||工商注销"></textarea>
+    <button class="btn" onclick="importSeeds()">批量导入</button>
+    <div id="seedList" class="tip">还没有种子账号</div>
+
+    <h3>公司信息（片头片尾用）</h3>
+    <label>简称</label><input id="setShort"/>
+    <label>城市</label><input id="setCity"/>
+
+    <h3>访问密码（公网部署必开）</h3>
+    <label>启用</label>
+    <select id="setAuthEnabled"><option value="false">关闭（仅限内网）</option><option value="true">启用 HTTP Basic 认证</option></select>
+    <label>用户名</label><input id="setAuthUser" placeholder="boss"/>
+    <label>密码（留空表示不修改已保存的密码）</label>
+    <input id="setAuthPwd" type="password" placeholder="设置一个访问密码"/>
+    <p class="tip">开启后刷新页面，浏览器会弹窗要求输入账号密码。忘记密码时把 <code>config/settings.json</code> 里 auth.password 改成空字符串即可。</p>
+
+    <button class="btn primary big" onclick="saveSettings()">保存设置</button>
+    <div id="setMsg" class="tip"></div>
+
+    <h3>剪辑模板参数</h3>
+    <div id="tplEditor"></div>
+    <button class="btn" onclick="saveTemplates()">保存模板</button>
+
+    <h3>数据维护</h3>
+    <p class="tip">交付时已重置为空白状态，自测用的素材与成片都已清掉，老板直接从第 1 步开始用。以后需要整体重置时点下面按钮：会清空全部素材、报告、文案、任务及视频文件；配置、剪辑模板和同行种子账号保留。</p>
+    <button class="btn danger" onclick="resetData()">清空演示数据</button>
+  </div>
+</aside>
+
+<div class="toast" id="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
