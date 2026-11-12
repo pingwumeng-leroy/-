@@ -1,0 +1,23 @@
+# 运行时数据：数据库、上传的素材/口播原片、成片、剪辑中间产物
+# 这些文件可能很大，也可能含业务内容，绝不入库
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# 服务器本地配置：含 TikHub / 大模型 API Key 与访问密码
+# 部署时复制 config/settings.example.json 为 config/settings.json 再填
+config/settings.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/
+*.log
