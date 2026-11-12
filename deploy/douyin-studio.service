@@ -1,0 +1,20 @@
+# systemd 单元示例。按实际改 User / WorkingDirectory / Python 路径后：
+#   sudo cp deploy/douyin-studio.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now douyin-studio
+# 日志：journalctl -u douyin-studio -f
+[Unit]
+Description=Heshenghong Douyin Content Studio
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/opt/douyin-studio
+Environment=PORT=8080
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/douyin-studio/.venv/bin/python /opt/douyin-studio/app.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

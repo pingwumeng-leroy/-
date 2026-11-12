@@ -1,0 +1,42 @@
+{
+  "llm": {
+    "enabled": false,
+    "base_url": "https://api.openai.com/v1",
+    "api_key": "",
+    "model": "gpt-4o-mini",
+    "timeout": 90
+  },
+  "asr": {
+    "enabled": false,
+    "base_url": "",
+    "api_key": "",
+    "model": "whisper-1"
+  },
+  "fetch": {
+    "douyin_cookie": "",
+    "prefer_height": 720
+  },
+  "company": {
+    "name": "四川合胜宏科技集团有限公司",
+    "short": "合胜宏企服",
+    "city": "成都"
+  },
+  "auth": {
+    "enabled": false,
+    "username": "boss",
+    "password": ""
+  },
+  "search": {
+    "provider": "mock",
+    "tikhub": {
+      "base_url": "https://api.tikhub.io",
+      "api_key": "",
+      "timeout": 30
+    }
+  },
+  "harvest": {
+    "default_count": 15,
+    "max_calls": 60,
+    "use_asr": false
+  }
+}
