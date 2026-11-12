@@ -60,14 +60,16 @@ curl -s -o /dev/null -w '后端状态 %{http_code}\n' http://127.0.0.1:8080/heal
 sudo cp deploy/nginx.conf.example /etc/nginx/sites-available/douyin-studio
 # 按下方「证书前置」处理后再启用：
 sudo ln -s /etc/nginx/sites-available/douyin-studio /etc/nginx/sites-enabled/
-sudo nginx -t && sudo systemctl reload nginx
+sudo nginx -t
+sudo systemctl enable --now nginx    # 首次部署必须 start；reload 只对已运行的服务有效
+# 之后再改配置：sudo nginx -t && sudo systemctl reload nginx
 ```
 
 `nginx.conf.example` 已配置 `client_max_body_size 1024m`（口播视频上传）与 `proxy_read_timeout 600s`（剪辑任务耗时）。
 
 **证书前置**：示例的 443 段引用 `/etc/letsencrypt/live/YOUR_DOMAIN/fullchain.pem`，没签证书时 `nginx -t` 会直接失败。两条路：
 
-1. **先签证书（推荐）**：先放一份只监听 80 的最小配置，`nginx -t && sudo systemctl reload nginx` 后执行 `sudo apt install -y certbot python3-certbot-nginx && sudo certbot --nginx -d 你的域名`，certbot 会自动补 SSL 与跳转；最后把 `client_max_body_size 1024m`、`proxy_read_timeout 600s` 补进 443 段。最小配置：
+1. **先签证书（推荐）**：先放一份只监听 80 的最小配置，`nginx -t && sudo systemctl restart nginx` 后执行 `sudo apt install -y certbot python3-certbot-nginx && sudo certbot --nginx -d 你的域名`，certbot 会自动补 SSL 与跳转；最后把 `client_max_body_size 1024m`、`proxy_read_timeout 600s` 补进 443 段。最小配置：
 
    ```nginx
    server {
