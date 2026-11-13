@@ -144,51 +144,90 @@ _CORRECT_SYSTEM = (
     "你是中文语音识别（ASR）校对员，专注财税、工商、企业服务领域。"
     "输入是 Whisper 转写的口播稿，存在同音字/谐音字错误"
     "（例如「营业值要」应为「营业执照」）。"
-    "请结合上下文和以下领域术语表纠正错别字：" + _DOMAIN_GLOSSARY + "。"
-    "硬性规则："
-    "1) 只改错别字和明显转写错误，不改动语序、不增删内容、不改口语风格；"
-    "2) 术语表的词优先于普通猜测；拿不准的原样保留，不要编造；"
-    "3) 数组必须逐条对应，条数、顺序都不能变。"
+    "请找出所有错别字并给出改法。参考领域术语："
+    + _DOMAIN_GLOSSARY + "。"
 )
 
 
-def correct_transcript(tr):
-    """用 DeepSeek 纠正逐字稿的 ASR 错别字，返回 (tr, 修正段数)。
+def _apply_replacements(text, pairs):
+    """按「错→对」替换表改文本。
 
-    按「段」纠正而不是纠正拼接全文：第四章的前 3 秒 / 前 15 秒原话、
-    信息密度曲线都来自 segments 的逐段文本，整段替换才能让全文和
-    时间戳指标保持一致。模型不可用或返回条数不符时原样返回，不阻断采集。
+    长词优先，且短词不得再改到已替换出的正确词上：
+    若「营业值要→营业执照」先执行，后面的「营业→企业」会把结果又改成
+    「企业执照」。所以对 right 中已包含其他 wrong 的情况做一次保护性跳过。
+    """
+    pairs = sorted(
+        [(str(a), str(b)) for a, b in pairs
+         if str(a).strip() and str(b).strip() and str(a) != str(b)],
+        key=lambda p: -len(p[0]))
+    # 保护：被更长 wrong 的 right 覆盖的区域不再参与短词替换
+    protected = []
+    out, hit = text, 0
+    for a, b in pairs:
+        if a not in out:
+            continue
+        if any(a in pr for pr in protected):
+            continue
+        hit += out.count(a)
+        out = out.replace(a, b)
+        protected.append(b)
+    return out, hit
+
+
+def correct_transcript(tr):
+    """用 DeepSeek 纠正逐字稿的 ASR 错别字，返回 (tr, 修正处数, 说明)。
+
+    让模型只输出「错词→正确词」对照表，而不是重写整段文本：
+    1) 输出短，不会因为 max_tokens 被截断；
+    2) 不会改动语序、不增删内容（让模型重写整段时很容易顺手改写）；
+    3) 替换表可复现、可审计，日志里能直接打出来。
+    模型不可用 / 输出破损时原样返回并在说明里写原因，不阻断采集。
     """
     if not tr or not tr.get("full") or not (tr.get("segments") or []):
-        return tr, 0
+        return tr, 0, "无逐字稿，跳过"
     from . import llm  # 局部导入，避免顶层循环
     if not llm.available():
-        return tr, 0
+        return tr, 0, "LLM 未启用或 Key 为空"
+
     segs = tr["segments"]
-    texts = [str(s.get("text") or "") for s in segs[:80]]
+    texts = [str(s.get("text") or "") for s in segs]
+    body = "\n".join("%d|%s" % (i + 1, t) for i, t in enumerate(texts))[:6000]
     try:
         data = llm.chat_json([
             {"role": "system", "content": _CORRECT_SYSTEM},
-            {"role": "user", "content": "待校对的逐字稿数组：\n" +
-             "\n".join("%d|%s" % (i + 1, t) for i, t in enumerate(texts)) +
-             "\n\n输出 JSON：{\"segments\": [\"纠正后的第1条\", ...]}，"
-             "条数必须与输入一致。"},
-        ], temperature=0.1, max_tokens=4000)
-        fixed = data.get("segments") if isinstance(data, dict) else None
-        if not isinstance(fixed, list) or len(fixed) != len(texts):
-            return tr, 0
-        changed = 0
-        for s, new in zip(segs[:80], fixed):
-            new = str(new or "").strip()
-            old = str(s.get("text") or "").strip()
-            if new and new != old:
-                s["text"] = new
-                changed += 1
-        if changed:
-            tr["full"] = "".join(str(s.get("text") or "") for s in segs)
-        return tr, changed
-    except Exception:
-        return tr, 0
+            {"role": "user", "content": body + (
+                "\n\n只输出错别字对照表，不要重写原文。JSON 格式："
+                '{"fixes": [{"wrong": "原文里逐字出现的错误片段", "right": "正确写法"}]}'
+                "\n要求：wrong 必须是原文中逐字出现的片段；没有错别字就输出 "
+                '{"fixes": []}。最多 30 条。')},
+        ], temperature=0.0, max_tokens=1500)
+    except Exception as exc:
+        return tr, 0, "调用失败：%s" % str(exc)[:80]
+
+    fixes = data.get("fixes") if isinstance(data, dict) else None
+    if not isinstance(fixes, list):
+        return tr, 0, "模型未按 fixes 格式返回：%s" % str(data)[:60]
+    pairs = []
+    for x in fixes:
+        if isinstance(x, dict):
+            pairs.append((x.get("wrong"), x.get("right")))
+    if not pairs:
+        return tr, 0, "模型判定无错别字"
+
+    hit_total = 0
+    for s in segs:
+        new, hit = _apply_replacements(str(s.get("text") or ""), pairs)
+        if hit:
+            s["text"] = new
+            hit_total += hit
+    if not hit_total:
+        sample = "、".join(str(a) for a, _b in pairs[:3])
+        return tr, 0, "给了 %d 条对照但原文未命中（%s）" % (len(pairs), sample)
+
+    tr["full"] = "".join(str(s.get("text") or "") for s in segs)
+    tr["corrections"] = [{"wrong": str(a), "right": str(b)} for a, b in pairs[:30]]
+    sample = "、".join("%s→%s" % (a, b) for a, b in pairs[:3])
+    return tr, hit_total, "替换 %d 处（%s）" % (hit_total, sample)
 
 
 def _wav_to_float32(path):
