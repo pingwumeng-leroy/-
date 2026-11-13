@@ -146,12 +146,23 @@ _lock = threading.Lock()
 
 
 def _ensure():
-    for d in (DATA, UPLOADS, OUTPUTS, ASSETS, CONFIG_DIR):
-        os.makedirs(d, exist_ok=True)
-    if not os.path.exists(SETTINGS_PATH):
-        _write(SETTINGS_PATH, DEFAULT_SETTINGS)
-    if not os.path.exists(TEMPLATES_PATH):
-        _write(TEMPLATES_PATH, DEFAULT_TEMPLATES)
+    try:
+        for d in (DATA, UPLOADS, OUTPUTS, ASSETS, CONFIG_DIR):
+            os.makedirs(d, exist_ok=True)
+        if not os.path.exists(SETTINGS_PATH):
+            _write(SETTINGS_PATH, DEFAULT_SETTINGS)
+        if not os.path.exists(TEMPLATES_PATH):
+            _write(TEMPLATES_PATH, DEFAULT_TEMPLATES)
+    except PermissionError as exc:
+        # 目录权限被改坏时，别只抛一个裸 Errno 13：直接给出可执行的修复命令。
+        # get_settings() 每次请求都会走到这里，所以不处理会让整个站点只剩一段 JSON。
+        raise RuntimeError(
+            "数据/配置目录不可写：%s。请在项目根目录执行："
+            "sudo chgrp -R www-data data config && "
+            "sudo chmod -R g+rwX data config && "
+            "sudo chmod o+rx . && sudo systemctl restart douyin-studio"
+            % exc
+        ) from exc
 
 
 def _write(path, obj):
