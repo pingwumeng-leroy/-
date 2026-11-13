@@ -1,9 +1,9 @@
 {
   "llm": {
     "enabled": false,
-    "base_url": "https://api.openai.com/v1",
+    "base_url": "https://api.deepseek.com",
     "api_key": "",
-    "model": "gpt-4o-mini",
+    "model": "deepseek-flash",
     "timeout": 90
   },
   "asr": {
@@ -37,6 +37,7 @@
   "harvest": {
     "default_count": 15,
     "max_calls": 60,
+    "comment_pages": 3,
     "use_asr": false
   }
 }

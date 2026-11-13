@@ -26,7 +26,7 @@ def available():
     return bool(s.get("enabled") and s.get("api_key") and s.get("base_url"))
 
 
-def chat(messages, temperature=0.7, max_tokens=2000, json_mode=False):
+def chat(messages, temperature=0.7, max_tokens=4000, json_mode=False):
     """返回文本；未启用/失败抛 LLMUnavailable，调用方负责规则兜底。"""
     if not available():
         raise LLMUnavailable("未启用 LLM，使用内置规则引擎")
@@ -50,9 +50,9 @@ def chat(messages, temperature=0.7, max_tokens=2000, json_mode=False):
         raise LLMUnavailable(f"LLM 调用失败：{exc}")
 
 
-def chat_json(messages, temperature=0.4):
+def chat_json(messages, temperature=0.4, max_tokens=4000):
     """要求返回 JSON 对象，做容错解析。"""
-    txt = chat(messages, temperature=temperature, json_mode=True)
+    txt = chat(messages, temperature=temperature, json_mode=True, max_tokens=max_tokens)
     txt = txt.strip()
     if txt.startswith("```"):
         txt = txt.split("```")[1]
