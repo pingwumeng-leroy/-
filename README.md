@@ -53,15 +53,46 @@ Creator API 只准备「素材 + 配音 + 编排」，**成片仍在本机渲染
 | 包类型 | 特征 | 执行方式 |
 |---|---|---|
 | **motion-kit**（官网现行） | `motion.json` + `assistant/motion.mjs` + `content/release.bin` | 调用包内官方助手 `start→new→setup→check→plan→prepare→preview→render`，本机出片 |
+| **poster-kit**（竖屏海报版式） | 同上，但 `guide.json` 里有 `workflowRouting.textOnly`，且附 `poster-kit.spec.json` | 同一套助手子命令，但**参数合同不同**（见下） |
 | **python-adapter**（旧） | `adapter.py` + `params.schema.json` | 直接跑 `adapter.py plan/prepare/render` |
 
-motion-kit 包的要点：
+motion-kit / poster-kit 包的要点：
 
 - **渲染在本机完成，不消耗任何积分**；账户积分为 0 也能出片。
 - 原包整份保留为 `data/motion/<名>/package.motion`，只解出 `assistant/` 供执行，`personal/`（含 Key）与 `content/release.bin` 不落地成明文。
 - 镜头由文案自动编排（关键词→控件：标题/要点/步骤/对比/名词解释/提示/数字/CTA/片尾），一条片子至少 6 种控件。
 - 官网现行包需要 **Node 22+**；旧的 adapter 包需要 Python 依赖（见下）。
 - 模板右上角的时间码与 `.m 角标` 是模板官方设计（time corner），不是可去的水印。
+- 安装时会读 `guide.json` 把模板画像（工作流、原生画幅、画幅尺寸、控件清单）固化进 `data/motion/<名>/profile.json`，出片时按画像自动选路线与画幅，不会再出现「横版构图硬塞竖屏造成大面积留白」。
+
+### 两条工作流的参数差异（踩过的坑）
+
+竖屏海报包（`vibrant-poster-portrait` 这类）走的是 **poster-kit**，不是 motion-kit。两者共用助手，但参数合同完全不同：
+
+| 环节 | motion-kit | poster-kit |
+|---|---|---|
+| `contract` | `contract <pkg> motion-kit` | `contract <pkg> poster-kit`（传 motion-kit 会 `WORKFLOW_UNAVAILABLE`） |
+| `setup` | 可选 `--cache` | **必须** `--cache <dir>`，否则 `RUNTIME_FAILED: Choose an explicit dependency cache` |
+| `check-params` | `check-params <json> --inputs <dir>` | `check-params --workflow poster-kit --timeline <json>`，**素材要放在实例根目录**（与 `timeline.json` 同级），放 `inputs/` 会报 `Missing media voiceover` |
+| 时间轴骨架 | `{workflow, header, timeline:{…}}` | 时间轴本体在顶层，必填 `duration / segments / voiceover / music / presenter` |
+| 渲染 | `render <project> --out` | `render --workflow poster-kit --timeline @vault --plan <dir> --preview-review <dir> --out` |
+
+poster-kit 的校验器有四道硬关卡，任一不过直接拒：
+
+1. **最短时长**：每个控件有 `minDur`（`steps 3.5`、`definition/compare/outro 4`、`list/tip 3`、`opener 2`…），低于就报 `时间轴不合格`。
+2. **音频时钟**：`AUDIO_CLOCK_MISMATCH` —— 成片总时长必须等于配音时长（±0.02s）。配音比模板下限短时，工作台会补尾部静音并把最后一条字幕拉长。
+3. **无空洞**：`RECOMPOSE_REQUIRED` —— 段与段不能重叠、不能留缝，末段必须正好到 `duration`。
+4. **旁白归属**：`narrationMap` 必须**每个镜头一行、按输出顺序**，且每个镜头都有 `spokenText`（`ALIGNMENT_REQUIRED`）。
+
+所以竖屏出片的时长不是「文案多长就多长」，而是「配音时长 ⇄ 镜头时长 ⇄ 字幕 ⇄ narrationMap 四者同一时钟」，由 `bind_poster_audio()` 一次算齐；配音太短塞不满模板下限时，宁可整体放慢 + 补尾静音，也不让画面被砍。
+
+### 竖屏排版的三个实测结论
+
+1. **镜头数比镜头时长重要**。一句话硬撑 5 秒会变成「一屏停尸」。工作台会按配音时长反推该有几屏（`(配音时长 - 6s 片头片尾) / 2.8s`），句子不够就把长句按逗号拆开，多铺几屏而不是拉长单屏。
+2. **opener 标题限 9 字**。1080 宽下可用区 960px，一个中文字约 96px，10 字就顶到 965px 压线。超出部分自动落到副标题。
+3. **上下留白是平台预留，不是 bug**。`captionSafeArea: short-video` 会按 `captionPosition`（默认底 24%、左 8%、右 16%）给抖音底部文案和右侧按钮让位。工作台改成底 20% / 左 8% / 右 10%，多留版面给内容且左右对称。
+
+判断「排版是否真的撑破」不能直接数 `geometry.json` 的违例条数：模板每 0.05s 采一帧，文字砸入飞出时本来就会短暂出画，一个正常片头能数出 200 多处。工作台只统计**每段镜头后半程**（动画已停）、且横向溢出超过可用宽度 4% 的文字，才触发缩字重排。
 
 旧 adapter 包的依赖：
 

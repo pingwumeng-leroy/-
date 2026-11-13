@@ -111,11 +111,14 @@ class MotionPackage:
                 meta["layouts"] = ["landscape", "portrait"]
                 meta["requires_presenter"] = False
                 meta["notes"].append("motion-kit 包：由包内官方助手渲染，成片本机生成、不耗积分")
-                ds = (mj.get("personality") or {}) if isinstance(mj, dict) else {}
                 stage = ((mj.get("extensions") or {})
                          .get("motiongit.com:delivery-stage") or {})
                 if stage.get("templateVersion"):
                     meta["template_version"] = stage["templateVersion"]
+                meta.update(motionkit.kit_profile(self.root))
+                if meta.get("native_layout"):
+                    # 原生竖屏模板只横向铺得开竖版构图，反过来则留白
+                    meta["layouts"] = [meta["native_layout"]]
                 return meta
 
         # ---- 入口：三类运行时，优先级 adapter > render.mjs > index.html ----
