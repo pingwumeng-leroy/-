@@ -88,24 +88,31 @@ def api_state():
     })
 
 
+def _mask_settings(s):
+    """回传设置时隐藏密钥。
+
+    GET 和 POST 都必须走这里：POST 若原样返回 save_settings() 的结果，
+    明文密码 / API Key 会出现在响应体、浏览器开发者工具与可能被采集的日志里。
+    """
+    out = {k: dict(v) for k, v in s.items() if isinstance(v, dict)}
+    for k in ("llm", "asr"):
+        key = out.get(k, {}).get("api_key", "")
+        if key:
+            out[k]["api_key"] = key[:4] + "****" + key[-4:]
+    if out.get("auth", {}).get("password"):
+        out["auth"]["password"] = "********"
+    tk = out.get("search", {}).get("tikhub", {})
+    if isinstance(tk, dict) and tk.get("api_key"):
+        masked = dict(tk)
+        masked["api_key"] = masked["api_key"][:4] + "****" + masked["api_key"][-4:]
+        out["search"]["tikhub"] = masked
+    return out
+
+
 @app.route("/api/settings", methods=["GET", "POST"])
 def api_settings():
     if request.method == "GET":
-        s = config.get_settings()
-        # 不回传完整密钥，做脱敏
-        out = {k: dict(v) for k, v in s.items() if isinstance(v, dict)}
-        for k in ("llm", "asr"):
-            key = out.get(k, {}).get("api_key", "")
-            if key:
-                out[k]["api_key"] = key[:4] + "****" + key[-4:]
-        if out.get("auth", {}).get("password"):
-            out["auth"]["password"] = "********"
-        tk = out.get("search", {}).get("tikhub", {})
-        if isinstance(tk, dict) and tk.get("api_key"):
-            masked = dict(tk)
-            masked["api_key"] = masked["api_key"][:4] + "****" + masked["api_key"][-4:]
-            out["search"]["tikhub"] = masked
-        return ok(out)
+        return ok(_mask_settings(config.get_settings()))
     data = request.get_json(force=True, silent=True) or {}
     # 脱敏值不覆盖已保存的密钥
     for k in ("llm", "asr"):
@@ -118,7 +125,7 @@ def api_settings():
     tk = (data.get("search") or {}).get("tikhub") if isinstance(data.get("search"), dict) else None
     if isinstance(tk, dict) and "****" in str(tk.get("api_key", "")):
         tk.pop("api_key", None)
-    return ok(config.save_settings(data))
+    return ok(_mask_settings(config.save_settings(data)))
 
 
 @app.route("/api/templates", methods=["GET", "POST"])
