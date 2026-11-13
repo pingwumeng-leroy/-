@@ -91,7 +91,9 @@ def run_harvest(jid):
         return
     params = json.loads(job.get("params") or "{}")
     count = int(params.get("count") or 15)
-    publish_days = int(params.get("publish_days") or 180)
+    # 0 是合法值（时间范围＝不限），不能用 or 兜底把它改成 180
+    _pd = params.get("publish_days")
+    publish_days = int(_pd) if _pd is not None else 180
     max_calls = int(params.get("max_calls") or 60)
     pages = int(params.get("pages_per_keyword") or 2)
     use_fallback = bool(params.get("use_seed_fallback", True))
@@ -108,28 +110,40 @@ def run_harvest(jid):
 
         collected, cost_calls, degraded = {}, 0, False
         for kw in kws:
+            # 每个关键词独立维护翻页令牌。TikHub 的 cursor / search_id / backtrace
+            # 必须用上一次响应带回的值；硬编码 page*8 只会重复拿到第一页。
+            cursor, search_id, backtrace = 0, "", ""
             for page in range(pages):
                 if cost_calls >= max_calls:
                     _log(jid, 40, lines, "已达到单次调用预算上限，停止搜索")
                     break
-                try:
-                    res = provider.search(kw, cursor=page * 8, sort_by="likes",
+                if degraded and use_fallback:
+                    # 已确认真实源不可用，后续不再逐条白试，避免无效调用刷屏
+                    res = fallback.search(kw, cursor=cursor, sort_by="likes",
                                           publish_days=publish_days)
-                    cost_calls += res.get("cost_calls", 1)
-                except providers.ProviderError as exc:
-                    degraded = True
-                    _log(jid, 30, lines, "「%s」%s：%s → 降级到演示数据" %
-                         (kw, type(exc).__name__, str(exc)[:120]))
-                    if not use_fallback:
-                        raise
-                    res = fallback.search(kw, cursor=page * 8, sort_by="likes",
-                                          publish_days=publish_days)
+                else:
+                    try:
+                        res = provider.search(kw, cursor=cursor, sort_by="likes",
+                                              publish_days=publish_days,
+                                              search_id=search_id, backtrace=backtrace)
+                        cost_calls += res.get("cost_calls", 1)
+                    except providers.ProviderError as exc:
+                        degraded = True
+                        _log(jid, 30, lines, "「%s」%s：%s → 降级到演示数据" %
+                             (kw, type(exc).__name__, str(exc)[:120]))
+                        if not use_fallback:
+                            raise
+                        res = fallback.search(kw, cursor=cursor, sort_by="likes",
+                                              publish_days=publish_days)
                 for it in res.get("items", []):
                     if it.get("aweme_id"):
                         collected[it["aweme_id"]] = it
                 _log(jid, 6 + min(30, cost_calls * 3), lines,
                      "「%s」第 %d 页 → %d 条，累计候选 %d" %
                      (kw, page + 1, len(res.get("items", [])), len(collected)))
+                cursor = res.get("cursor") or cursor + len(res.get("items", []))
+                search_id = res.get("search_id") or ""
+                backtrace = res.get("backtrace") or ""
                 if not res.get("has_more"):
                     break
             if cost_calls >= max_calls:
@@ -176,10 +190,14 @@ def run_harvest(jid):
                     comments = cres.get("items", [])
                 except providers.ProviderError:
                     comments = fallback.comments(item["aweme_id"]).get("items", [])
+                # 用 .get() 取字段：第三方 provider 或手工导入的 item 可能缺列，
+                # 不应因为一个可选字段让整条视频的分析全部失败。
+                title = item.get("title") or item.get("desc") or "未命名视频"
+                likes = item.get("digg_count") or 0
                 transcript = _build_transcript(item, comments)
-                report = analyze.rule_analyze(item["title"], transcript, meta={
-                    "likes": item["digg_count"], "author": item["author"],
-                    "publish_time": item["publish_time"],
+                report = analyze.rule_analyze(title, transcript, meta={
+                    "likes": likes, "author": item.get("author") or "",
+                    "publish_time": item.get("publish_time") or 0,
                 })
                 if comments:
                     report["top_comments"] = [c["text"] for c in comments[:5]]
@@ -193,7 +211,7 @@ def run_harvest(jid):
                 continue
             _log(jid, 50 + int(45 * (i + 1) / max(len(target), 1)), lines,
                  "已入库 %d/%d：%s（%d 赞）" %
-                 (imported, len(target), item["title"][:26], item["digg_count"]))
+                 (imported, len(target), title[:26], likes))
 
         db.update_harvest_job(
             jid, status="done", progress=100, imported=imported,
@@ -211,9 +229,11 @@ def run_harvest(jid):
 def start_harvest(text, params=None):
     """建任务并起后台线程，返回 job id。"""
     s = config.get_settings().get("harvest", {})
+    _pd = (params or {}).get("publish_days")
     p = {
         "count": int((params or {}).get("count") or s.get("default_count", 15)),
-        "publish_days": int((params or {}).get("publish_days") or 180),
+        # 0 = 时间范围「不限」，保留原值，别被 or 兜底成 180
+        "publish_days": int(_pd) if _pd is not None else 180,
         "max_calls": int((params or {}).get("max_calls") or s.get("max_calls", 60)),
         "pages_per_keyword": int((params or {}).get("pages_per_keyword") or 2),
         "likes_mode": (params or {}).get("likes_mode") or "percentile",

@@ -64,8 +64,13 @@ class SearchProvider:
     label = "基础接口"
     supports_comments = False
 
-    def search(self, keyword, *, cursor=0, sort_by="likes", publish_days=180, page_size=8):
-        """返回 {"items": [SearchItem...], "cursor": int, "has_more": bool, "cost_calls": int}"""
+    def search(self, keyword, *, cursor=0, sort_by="likes", publish_days=180,
+               page_size=8, **kwargs):
+        """返回 {"items": [SearchItem...], "cursor": int, "has_more": bool, "cost_calls": int}
+
+        kwargs 接纳供应商专属的翻页令牌（search_id / backtrace），
+        MockProvider 会忽略，TikHubProvider 用来串起下一页。
+        """
         raise NotImplementedError
 
     def comments(self, aweme_id, cursor=0):
@@ -154,7 +159,8 @@ class MockProvider(SearchProvider):
             out[-1]["_topic"] = topic
         return out
 
-    def search(self, keyword, *, cursor=0, sort_by="likes", publish_days=180, page_size=8):
+    def search(self, keyword, *, cursor=0, sort_by="likes", publish_days=180,
+               page_size=8, **kwargs):
         kw = (keyword or "").strip()
         pool = self._all()
         if publish_days:
@@ -225,14 +231,22 @@ class TikHubProvider(SearchProvider):
         self.api_key = api_key or ""
         self.timeout = timeout or 30
 
-    def _post(self, path, payload):
+    def _request(self, method, path, *, params=None, payload=None):
+        """统一请求出口，认证与错误映射集中在这里。
+
+        官方 spec V5.3.2：
+        - 搜索 /search/fetch_video_search_v2 是 POST + JSON Body
+        - 评论 /web/fetch_video_comments 是 GET + query 参数
+        两者都用 Authorization: Bearer <token>。
+        """
         if not self.api_key:
             raise AuthFailed("未配置 TikHub API Key，请在「设置 → 数据源」里填写")
         url = self.base_url + path
         try:
-            r = requests.post(url, json=payload, timeout=self.timeout,
-                              headers={"Authorization": "Bearer " + self.api_key,
-                                       "Accept": "application/json"})
+            r = requests.request(method, url, params=params, json=payload,
+                                 timeout=self.timeout,
+                                 headers={"Authorization": "Bearer " + self.api_key,
+                                          "Accept": "application/json"})
         except requests.RequestException as exc:
             raise ProviderUnavailable("网络请求失败：%s" % type(exc).__name__)
 
@@ -262,17 +276,31 @@ class TikHubProvider(SearchProvider):
     def _pt(publish_days):
         return "180" if publish_days >= 180 else ("7" if publish_days >= 7 else ("1" if publish_days >= 1 else "0"))
 
-    def search(self, keyword, *, cursor=0, sort_by="likes", publish_days=180, page_size=8):
+    @staticmethod
+    def _pick(*vals):
+        """取第一个非 None 的值；has_more=0 是合法值，不能用 or 链。"""
+        for v in vals:
+            if v is not None:
+                return v
+        return None
+
+    def search(self, keyword, *, cursor=0, sort_by="likes", publish_days=180,
+               page_size=8, search_id="", backtrace=""):
         payload = {
             "keyword": keyword, "cursor": int(cursor),
             "sort_type": "1" if sort_by == "likes" else "2",
             "publish_time": self._pt(publish_days),
             "filter_duration": "0", "content_type": "1",
-            "search_id": "", "backtrace": "",
+            # 翻页令牌必须用上一次响应里带回的值，首次请求才传空字符串
+            "search_id": search_id or "", "backtrace": backtrace or "",
         }
-        data = self._post(self.SEARCH_PATH, payload)
+        data = self._request("POST", self.SEARCH_PATH, payload=payload)
         body = data.get("data") or {}
-        rows = body.get("business_data") or []
+        pg = body.get("pagination") or {}
+        # 字段层级在不同版本可能落在 data / data.pagination / 顶层，逐层兜底
+        rows = body.get("business_data")
+        if rows is None:
+            rows = data.get("business_data") or []
         items = []
         for row in rows:
             node = (row.get("data") or {}).get("aweme_info") or {}
@@ -295,23 +323,43 @@ class TikHubProvider(SearchProvider):
                 "share_count": st.get("share_count"),
                 "publish_time": node.get("create_time"),
                 "duration": (video.get("duration") or 0) / 1000.0,
+                "share_url": node.get("share_url") or "",
                 "play_url": play[0] if play else "",
                 "cover_url": cover[0] if cover else "",
             }))
-        nxt = body.get("cursor") or (int(cursor) + len(items))
+        raw_cursor = self._pick(body.get("cursor"), pg.get("offset"), data.get("cursor"))
+        try:
+            nxt = int(raw_cursor)
+        except (TypeError, ValueError):
+            nxt = int(cursor) + len(items)
+        has_more = self._pick(body.get("has_more"), pg.get("has_more"), data.get("has_more"))
         return {"items": items, "cursor": nxt,
-                "has_more": bool(body.get("has_more")) and bool(items),
+                "has_more": bool(has_more) and bool(items),
+                "search_id": self._pick(body.get("search_id"), pg.get("search_id"),
+                                        data.get("search_id")) or "",
+                "backtrace": self._pick(body.get("backtrace"), pg.get("backtrace"),
+                                        data.get("backtrace")) or "",
                 "cost_calls": 1, "provider": self.name}
 
     def comments(self, aweme_id, cursor=0):
-        """评论端点为可选增强；拿不到就返回空，不拖累主流程。"""
+        """评论端点为 GET + query；拿不到就返回空，不拖累主流程。
+
+        早期误按 POST + JSON Body 发出，TikHub 会回 405/422，异常被吞掉后
+        表现为「分析报告里没有评论区内容」。这里按官方 spec 修正。
+        """
+        empty = {"items": [], "cursor": 0, "has_more": False,
+                 "cost_calls": 0, "provider": self.name}
         try:
-            data = self._post(self.COMMENTS_PATH, {"aweme_id": aweme_id, "cursor": int(cursor), "count": 20})
+            data = self._request("GET", self.COMMENTS_PATH,
+                                 params={"aweme_id": aweme_id,
+                                         "cursor": int(cursor), "count": 20})
         except ProviderError:
-            return {"items": [], "cursor": 0, "has_more": False, "cost_calls": 0, "provider": self.name}
-        rows = ((data.get("data") or {}).get("comments") or [])
+            return empty
+        body = data.get("data") or {}
+        rows = self._pick(body.get("comments"), body.get("comment_list"),
+                          data.get("comments")) or []
         items = [{"text": c.get("text") or "", "digg_count": c.get("digg_count") or 0}
-                 for c in rows if c.get("text")]
+                 for c in rows if isinstance(c, dict) and c.get("text")]
         return {"items": items, "cursor": 0, "has_more": False,
                 "cost_calls": 1, "provider": self.name}
 
