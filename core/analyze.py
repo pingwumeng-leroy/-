@@ -423,6 +423,9 @@ def deep_analyze(item, comments, tr=None):
         tf["source"] = "faster-whisper 本地转写"
         # 完整逐字稿全文入库（DeepSeek 纠错后），第四章前端展示用
         tf["full_text"] = str(tr.get("full") or "")[:8000]
+        # 校对留痕：有 corrections 才是真正替换过；correct_note 是未生效原因
+        tf["corrections"] = list(tr.get("corrections") or [])[:30]
+        tf["correct_note"] = str(tr.get("correct_note") or "")
         facts["transcript"] = tf
 
     # 首次输入：评论样本 40 条但只留文字与点赞（统计已在 facts 里算好），

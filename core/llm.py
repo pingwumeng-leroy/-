@@ -109,29 +109,39 @@ def _dump_llm_error(raw, exc, txt):
 
 
 def chat_json(messages, temperature=0.4, max_tokens=4000):
-    """要求返回 JSON 对象；对模型常见的三类破损做容错解析。
+    """要求返回 JSON 对象；对模型常见的四类破损做容错解析。
 
     1) markdown 代码块 / 前后解释文字；2) 尾随逗号、字符串内裸换行；
-    3) 被 max_tokens 截断导致闭合符缺失（十维长 JSON 最常见）。
-    仍失败时抛 LLMUnavailable，并在 data/llm_json_error.txt 留下原文。
+    3) 被 max_tokens 截断导致闭合符缺失（十维长 JSON 最常见）；
+    4) json_object 模式偶发返回空串（DeepSeek 实测）——此时去掉
+       response_format 限制再试一次，靠提示词里的「只输出 JSON」兜底。
+    两次都失败时抛 LLMUnavailable，并在 data/llm_json_error.txt 留下原文。
     """
-    raw = chat(messages, temperature=temperature, json_mode=True,
-               max_tokens=max_tokens)
-    txt = _strip_json(raw)
-    try:
-        # strict=False 允许字符串里出现裸换行/控制字符
-        return json.loads(txt, strict=False)
-    except (ValueError, TypeError) as exc:
+    last_exc = None
+    for json_mode in (True, False):
+        try:
+            raw = chat(messages, temperature=temperature, json_mode=json_mode,
+                       max_tokens=max_tokens)
+        except LLMUnavailable as exc:
+            last_exc = exc
+            continue
+        txt = _strip_json(raw)
+        if not txt:
+            last_exc = LLMUnavailable("模型返回空内容（json_mode=%s）" % json_mode)
+            continue
+        try:
+            # strict=False 允许字符串里出现裸换行/控制字符
+            return json.loads(txt, strict=False)
+        except (ValueError, TypeError) as exc:
+            last_exc = exc
         fixed = _close_json(txt)
         if fixed != txt:
             try:
                 return json.loads(fixed, strict=False)
-            except (ValueError, TypeError):
-                pass
-        _dump_llm_error(raw, exc, txt)
-        raise LLMUnavailable(
-            "模型返回的 JSON 无法解析：%s；长度 %d，末尾 %s" %
-            (exc, len(txt), txt[-100:].replace("\n", " ")))
+            except (ValueError, TypeError) as exc:
+                last_exc = exc
+        _dump_llm_error(raw, last_exc, txt)
+    raise LLMUnavailable("模型返回的 JSON 无法解析：%s" % last_exc)
 
 
 def asr_transcribe(audio_path):

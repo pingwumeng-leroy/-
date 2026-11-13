@@ -230,6 +230,7 @@ def run_harvest(jid):
                                      (len(tr["full"]), len(tr["segments"])))
                                 # DeepSeek 上下文纠错：只改错别字，不改时间戳结构
                                 tr, nfix, why = transcript.correct_transcript(tr)
+                                tr["correct_note"] = why
                                 if nfix:
                                     _log(jid, 50, lines, "逐字稿纠错：%s" % why)
                                 else:
