@@ -1,0 +1,22 @@
+# douyin-studio 反代示例 —— 追加到现有 Caddyfile，**不要覆盖原有站点块**
+#
+# 用法：
+#   1. 把 YOUR_DOMAIN 换成实际域名（DNS 已解析到本服务器）
+#   2. 把下面这个站点块追加到 /etc/caddy/Caddyfile 末尾
+#   3. sudo caddy fmt /etc/caddy/Caddyfile >/dev/null && sudo systemctl reload caddy
+#
+# Caddy 会自动申请并续期 Let's Encrypt 证书、自动把 HTTP 跳转到 HTTPS，
+# 不需要 certbot，也不需要自己写 443 / ssl_certificate。
+#
+# 为什么这么短：
+#   - Caddy 默认不限制请求体大小，正好适配口播原片上传（Flask 侧 MAX_CONTENT_LENGTH = 1GB）
+#   - reverse_proxy 的 read_timeout / write_timeout 默认「无超时」，长剪辑任务不会被提前断开
+#   - 若后端不在本机，把 127.0.0.1:8080 换成实际地址
+#
+# 注意：如果服务器上的 Caddy 是平台托管、配置文件不可编辑，
+#       请在平台控制台添加「域名 / 端口转发」规则指向 127.0.0.1:8080，
+#       不要修改本机的 Caddyfile。
+
+YOUR_DOMAIN {
+    reverse_proxy 127.0.0.1:8080
+}

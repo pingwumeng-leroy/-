@@ -28,8 +28,10 @@ sudo apt install -y ffmpeg fonts-noto-cjk   # 剪辑与中文渲染依赖
 
 ## 服务器部署
 
+> **服务器已有 Caddy（80 端口被占）时，直接跳到下方「已有 Caddy 的服务器」**：不要装 nginx、不要执行任何 nginx 命令，也不要跑 certbot。
+
 ```bash
-sudo apt install -y python3-venv ffmpeg fonts-noto-cjk nginx
+sudo apt install -y python3-venv ffmpeg fonts-noto-cjk nginx   # nginx 仅在服务器上没有 Caddy 时才装
 
 # /opt 属主是 root，普通用户不能在里面建目录：先建好，再把属主改成自己
 sudo mkdir -p /opt/douyin-studio
@@ -112,6 +114,43 @@ tar -xzf douyin-studio.tar.gz -C /opt/douyin-studio
 ```
 
 > **仓库公开后尤其注意**：`config/settings.json`、`data/`、`*.db` 已被 `.gitignore` 排除，其中会存 TikHub Token、访问密码和抖音 Cookie。任何情况下都不要用 `git add -f` 把它们提交上去——一旦 push 就是公开泄露。
+
+## 已有 Caddy 的服务器（推荐）
+
+服务器上已经有 Caddy 占着 80 端口时，不要跟它抢：把 douyin-studio 作为**一个新站点块追加**到现有 Caddy 配置即可。Caddy 自带自动 HTTPS，比 nginx + certbot 省事得多。
+
+```bash
+# 1. 先确认 Caddy 的形态与配置文件位置
+systemctl status caddy --no-pager | head -12
+sudo cat /etc/caddy/Caddyfile
+docker ps --format '{{.Names}} {{.Image}} {{.Ports}}' | grep -i caddy   # 若上面显示 not found
+
+# 2. 确认后端活着（应为 200）
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/healthz
+
+# 3. 备份后追加站点块，把「你的域名」换成实际域名（完整示例见 deploy/Caddyfile.example）
+sudo cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak
+sudo tee -a /etc/caddy/Caddyfile >/dev/null <<'EOF'
+
+你的域名 {
+    reverse_proxy 127.0.0.1:8080
+}
+EOF
+
+# 4. 校验并热加载，不会中断现有站点
+sudo caddy fmt /etc/caddy/Caddyfile >/dev/null && sudo systemctl reload caddy
+
+# 5. 清理之前为 nginx 做的准备，避免以后误启动抢 80
+sudo systemctl disable --now nginx
+sudo rm -f /etc/nginx/sites-enabled/douyin-studio
+```
+
+验证：`curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: 你的域名' http://127.0.0.1/healthz` 应返回 200；浏览器打开 `https://你的域名/healthz`，证书由 Caddy 自动签发。
+
+- **Caddy 跑在 Docker 里**：改的是容器挂载的 Caddyfile（`docker inspect <容器名>` 找挂载路径），然后 `docker exec <容器名> caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`；容器里没有 `systemctl`。
+- **Caddy 是云平台托管的反代**（配置文件不可编辑，也不是你能改的容器）：去平台控制台加一条「域名 / 端口转发」指向 `127.0.0.1:8080`，本机不用改任何东西。
+
+> 无论用 nginx 还是 Caddy，公网部署都必须在设置页开启 `auth.enabled` 访问密码。
 
 ## 配置说明
 
