@@ -249,11 +249,15 @@
     <label>启用</label>
     <select id="setLlmEnabled"><option value="false">关闭（用内置引擎）</option><option value="true">启用</option></select>
     <label>Base URL（OpenAI 兼容）</label>
-    <input id="setLlmUrl" placeholder="https://api.openai.com/v1"/>
+    <input id="setLlmUrl" placeholder="https://api.deepseek.com"/>
     <label>API Key</label>
     <input id="setLlmKey" type="password" placeholder="sk-…"/>
     <label>模型名</label>
-    <input id="setLlmModel" placeholder="gpt-4o-mini"/>
+    <input id="setLlmModel" placeholder="deepseek-flash"/>
+    <div class="row">
+      <button class="btn" onclick="testLLM()" id="btnTestLlm">测试大模型连接</button>
+    </div>
+    <div id="llmTestMsg" class="tip">先保存设置，再发起 1 次极小的调用，确认模型名是否被上游接受。DeepSeek 的 Base URL 填 <code>https://api.deepseek.com</code>；模型名填你指定的 <code>deepseek-flash</code>。</div>
 
     <h3>语音转写接口（可选）</h3>
     <label>启用</label>
@@ -281,7 +285,9 @@
     <input id="setTikhubKey" type="password" placeholder="Bearer Token"/>
     <label>单次调用预算上限</label>
     <input id="setMaxCalls" type="number" value="60"/>
-    <p class="tip">Key 只存在服务器 <code>config/settings.json</code>，页面不回传明文。切到 TikHub 前需验证邮箱并充值，否则返回 403 / 402；失败会自动降级到演示数据。</p>
+    <label>每条视频评论翻页数</label>
+    <input id="setCommentPages" type="number" value="3" min="1" max="10"/>
+    <p class="tip">Key 只存在服务器 <code>config/settings.json</code>，页面不回传明文。切到 TikHub 前需验证邮箱并充值，否则返回 403 / 402；失败会自动降级到演示数据。评论每页固定 20 条、每翻一页计费一次，与搜索共用「单次调用预算上限」，预算用完自动跳过评论采集。</p>
     <div class="row">
       <button class="btn" onclick="testProvider()" id="btnTestProvider">测试数据源连接</button>
     </div>

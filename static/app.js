@@ -148,26 +148,175 @@ function parseField(v) {
     : (typeof x === 'object' ? JSON.stringify(x, null, 1) : x); }
   catch (e) { return v; }
 }
+/* ---------- 报告详情：轻量 AI 十维，网页内详情页 ----------
+   只消费 report_json 里的 facts / ai_analysis 两个节点，不新增接口、不改表结构。
+   按确认结果渲染第一/二/三/四/六/八章；第五章「画面与剪辑」、
+   第七章「与博主最近作品对比」不生成也不渲染。                     */
+function num(v) {
+  if (v == null || v === '') return '—';
+  const n = Number(v);
+  return isNaN(n) ? '—' : n.toLocaleString('zh-CN');
+}
+function pct(v) { return v == null ? '—' : (Number(v) * 100).toFixed(1) + '%'; }
+function bullets(arr) {
+  const a = (arr || []).filter(x => x != null && String(x).trim());
+  return a.length ? a.map(x => `<li>${esc(x)}</li>`).join('') : '<li class="muted">—</li>';
+}
+function secHead(no, title) { return `<h4><i>${no}</i>${esc(title)}</h4>`; }
+function insightBox(txt) { return txt ? `<p class="insight">${esc(txt)}</p>` : ''; }
+function hasDeep(r) {
+  try {
+    const R = JSON.parse(r.report_json || 'null');
+    return !!(R && R.ai_analysis && R.facts);
+  } catch (e) { return false; }
+}
+function radarSVG(dims) {
+  const n = 10, cx = 120, cy = 105, R = 76;
+  const pt = (i, r) => {
+    const a = -Math.PI / 2 + i * 2 * Math.PI / n;
+    return [cx + Math.cos(a) * r, cy + Math.sin(a) * r];
+  };
+  const polygon = k => Array.from({length: n}, (_, i) =>
+    pt(i, R * k).map(v => v.toFixed(1)).join(',')).join(' ');
+  const rings = [0.25, 0.5, 0.75, 1].map(k =>
+    `<polygon points="${polygon(k)}" class="ring"/>`).join('');
+  const axes = Array.from({length: n}, (_, i) => {
+    const p = pt(i, R);
+    return `<line x1="${cx}" y1="${cy}" x2="${p[0].toFixed(1)}" y2="${p[1].toFixed(1)}" class="axis"/>`;
+  }).join('');
+  const vals = dims.slice(0, n).map(d => Math.max(1, Math.min(10, Number(d.score) || 5)) / 10);
+  while (vals.length < n) vals.push(0.5);
+  const area = vals.map((v, i) => pt(i, R * v).map(x => x.toFixed(1)).join(',')).join(' ');
+  const dots = vals.map((v, i) => {
+    const p = pt(i, R * v);
+    return `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="2.6"/>`;
+  }).join('');
+  const labels = Array.from({length: n}, (_, i) => {
+    const p = pt(i, R + 14);
+    return `<text x="${p[0].toFixed(1)}" y="${p[1].toFixed(1)}" text-anchor="middle" class="lab">${i + 1}</text>`;
+  }).join('');
+  const legend = dims.slice(0, n).map((d, i) =>
+    `<li><b>${i + 1}</b>${esc(d.name || '')}</li>`).join('');
+  return '<svg viewBox="0 0 240 210" class="radar" xmlns="http://www.w3.org/2000/svg">' +
+    rings + axes + `<polygon points="${area}" class="area"/>` + dots + labels + '</svg>' +
+    `<ol class="radarlegend">${legend}</ol>`;
+}
+function renderDeepReport(r, R) {
+  const ai = R.ai_analysis || {}, f = R.facts || {};
+  const e = f.engagement || {}, t = f.title || {}, c = f.comments || null;
+  const ins = ai.insights || {}, dims = ai.dimensions || [];
+  const ratioRows = [
+    ['评论/点赞', e.comment_like_ratio],
+    ['收藏/点赞', e.collect_like_ratio],
+    ['转发/点赞', e.share_like_ratio]
+  ].map(([k, v]) => `<div class="ratiobar"><span>${k}</span>` +
+    `<div class="track"><div style="width:${v == null ? 0 : Math.min(100, Number(v) * 100).toFixed(1)}%"></div></div>` +
+    `<b>${pct(v)}</b></div>`).join('');
+  const tags = (t.hashtags || []).map(x => `<span class="tag">#${esc(x)}</span>`).join('') ||
+    '<span class="muted">无话题标签</span>';
+  const catBars = c ? (c.category_share || []).slice(0, 6).map(x =>
+    `<div class="cbar"><span>${esc(x.name)}</span>` +
+    `<div class="track"><div style="width:${(Number(x.ratio) * 100).toFixed(1)}%"></div></div>` +
+    `<b>${pct(x.ratio)}</b></div>`).join('') : '';
+  const topRows = c ? (c.top || []).map(x =>
+    `<tr><td class="num">${num(x.likes)}</td><td class="num">${num(x.replies)}</td>` +
+    `<td>${esc(x.text)}</td><td>${esc((x.cats || []).join('、'))}</td></tr>`).join('') : '';
+  const span = c && c.time_span
+    ? `${c.time_span.first} ~ ${c.time_span.last}（${c.time_span.days} 天）` : '—';
+  const dimRows = dims.map(d =>
+    `<tr><td>${esc(d.name)}</td><td class="num">${num(d.score)}</td>` +
+    `<td>${esc(d.finding)}</td><td>${esc(d.why_it_works)}</td><td>${esc(d.reusable)}</td></tr>`).join('');
+  const secs = num(f.duration && f.duration.seconds);
+
+  return `<div class="rpt">
+    <div class="rpt-top">
+      <div class="rpt-meta">${esc(r.author || f.author || '—')} · ${secs} 秒 · ${num(e.likes)} 赞 · ${num(e.comments)} 评论 · ${esc(r.source_provider || '')} · 模型 ${esc(ai.model || '—')}</div>
+      <blockquote class="rpt-oneline">${esc(ai.one_line || r.summary || '—')}</blockquote>
+      <div class="rpt-sub"><b>关键爆款因素</b><ol>${bullets(ai.key_drivers)}</ol></div>
+      ${ai.formula ? `<div class="formula"><b>可套用公式：</b>${esc(ai.formula)}</div>` : ''}
+    </div>
+    <section class="rpt-sec">
+      ${secHead('一', '互动数据结构')}
+      <div class="metrics">
+        <div class="metric"><span>点赞</span><b>${num(e.likes)}</b></div>
+        <div class="metric"><span>评论</span><b>${num(e.comments)}</b></div>
+        <div class="metric"><span>收藏</span><b>${num(e.collects)}</b></div>
+        <div class="metric"><span>转发</span><b>${num(e.shares)}</b></div>
+      </div>
+      ${ratioRows}
+      ${insightBox(ins['1'])}
+      ${e.note ? `<p class="muted" style="margin-top:8px">${esc(e.note)}</p>` : ''}
+    </section>
+    <section class="rpt-sec">
+      ${secHead('二', '时长策略')}
+      <div class="metrics"><div class="metric"><span>视频时长</span><b>${secs}s</b></div></div>
+      ${insightBox(ins['2'])}
+    </section>
+    <section class="rpt-sec">
+      ${secHead('三', '标题与话题')}
+      <div>${tags}</div>
+      <p class="muted" style="margin:8px 0 0">标题正文 ${num(t.title_len)} 字 · ${t.has_number ? '含数字' : '无数字'} · ${t.has_question ? '含疑问/悬念' : '无疑问词'} · 地域词 ${esc(t.city_hit || '无')}</p>
+      ${insightBox(ins['3'])}
+    </section>
+    <section class="rpt-sec">
+      ${secHead('四', '开头钩子与讲述节奏')}
+      <div class="warnbox">⚠ 轻量档未下载视频、未做语音转写，<b>没有逐字稿</b>。本节仅为基于标题 / 视频文案 / 评论样本的钩子类型推断，不含前 3 秒原话、语速与信息密度曲线。</div>
+      <p style="margin:0">规则判定钩子类型：<b>${esc(r.hook_type || '—')}</b></p>
+      ${insightBox(ins['4'])}
+    </section>
+    <section class="rpt-sec">
+      ${secHead('六', '评论区')}
+      ${c ? `<div class="metrics">
+          <div class="metric"><span>样本条数</span><b>${num(c.count)}</b></div>
+          <div class="metric"><span>@ 好友</span><b>${num(c.mention_count)}</b></div>
+          <div class="metric"><span>时间跨度</span><b style="font-size:12px">${esc(span)}</b></div>
+        </div>
+        <div class="muted" style="margin-bottom:6px">评论情绪（按点赞加权，关键词分类）</div>
+        ${catBars}
+        <table><thead><tr><th>赞</th><th>回复</th><th>最高赞评论</th><th>类型</th></tr></thead>
+        <tbody>${topRows || '<tr><td colspan="4" class="muted">无评论样本</td></tr>'}</tbody></table>`
+        : '<p class="muted">本次未取到评论数据（可能预算用尽或上游无公开评论）。</p>'}
+      ${insightBox(ins['6'])}
+    </section>
+    <section class="rpt-sec">
+      ${secHead('八', 'AI 十维拆解')}
+      <div class="radarbox">${radarSVG(dims)}</div>
+      <table><thead><tr><th>维度</th><th>分数</th><th>发现</th><th>为什么有效</th><th>怎么复用</th></tr></thead>
+      <tbody>${dimRows}</tbody></table>
+      <div class="rpt-sub"><b>可改进</b><ol>${bullets(ai.weaknesses)}</ol></div>
+      <div class="rpt-sub"><b>同公式新选题</b><ol>${bullets(ai.next_ideas)}</ol></div>
+    </section>
+    <div class="rpt-foot">数据源 ${esc(r.source_provider || '—')} · 分析引擎 ${esc(ai.model || r.engine || '—')} · 按配置不生成第五章「画面与剪辑」与第七章「与博主最近作品对比」</div>
+  </div>`;
+}
+function reportDetail(r) {
+  if (hasDeep(r)) {
+    try { return renderDeepReport(r, JSON.parse(r.report_json)); }
+    catch (e) { return `<div class="kv"><span class="k">解析失败</span><span>${esc(e.message)}</span></div>`; }
+  }
+  return `<div class="kv">
+    <span class="k">可复用模式</span><span>${esc(r.reusable_pattern)}</span>
+    <span class="k">内容结构</span><span>${esc(parseField(r.structure))}</span>
+    <span class="k">受众痛点</span><span>${esc(parseField(r.pain_points))}</span>
+    <span class="k">高频提问</span><span>${esc(parseField(r.top_comments))}</span>
+    <span class="k">政策引用</span><span>${esc(parseField(r.policy_refs))}</span>
+    <span class="k">合规风险</span><span>${esc(r.risk_notes)}</span>
+    <span class="k">总结</span><span>${esc(r.summary)}</span>
+  </div>`;
+}
+
 async function loadReports() {
   const list = await api('/api/reports');
   $('nReports').textContent = list.length + ' 份报告';
   $('reportList').innerHTML = list.length ? list.map(r => `
     <div class="item"><div class="body">
       <div class="t">${esc(r.title || '未命名报告')}</div>
-      <div class="d">${esc(r.topic||'其他')} · ${esc(r.city||'—')} · ${esc(r.hook_type||'—')} · ${esc(r.engine)} 引擎${r.likes ? ' · ' + r.likes + ' 赞' : ''}${r.author ? ' · ' + esc(r.author) : ''}${r.harvest_job_id ? ' · 采集 #' + r.harvest_job_id : ''}</div>
-      <div class="detail ${CUR.reportOpen[r.id] ? '' : 'hidden'}" id="rd_${r.id}">
-        <div class="kv">
-          <span class="k">可复用模式</span><span>${esc(r.reusable_pattern)}</span>
-          <span class="k">内容结构</span><span>${esc(parseField(r.structure))}</span>
-          <span class="k">受众痛点</span><span>${esc(parseField(r.pain_points))}</span>
-          <span class="k">高频提问</span><span>${esc(parseField(r.top_comments))}</span>
-          <span class="k">政策引用</span><span>${esc(parseField(r.policy_refs))}</span>
-          <span class="k">合规风险</span><span>${esc(r.risk_notes)}</span>
-          <span class="k">总结</span><span>${esc(r.summary)}</span>
-        </div>
+      <div class="d">${esc(r.topic||'其他')} · ${esc(r.city||'—')} · ${esc(r.hook_type||'—')} · ${r.engine==='llm'?'AI 十维':(r.engine==='manual'?'手工':'规则')} 引擎${r.likes ? ' · ' + r.likes + ' 赞' : ''}${r.author ? ' · ' + esc(r.author) : ''}${r.harvest_job_id ? ' · 采集 #' + r.harvest_job_id : ''}</div>
+      <div class="detail ${hasDeep(r) ? 'deep' : ''} ${CUR.reportOpen[r.id] ? '' : 'hidden'}" id="rd_${r.id}">
+        ${reportDetail(r)}
       </div>
     </div><div class="acts">
-      <span class="pill ${r.engine==='llm'?'ok':''}">${r.engine==='llm'?'AI 分析':(r.engine==='manual'?'手工':'内置')}</span>
+      <span class="pill ${r.engine==='llm'?'ok':''}">${r.engine==='llm'?'AI 十维':(r.engine==='manual'?'手工':'内置')}</span>
       ${r.source_provider ? `<span class="pill ${r.source_provider.indexOf('tikhub')>=0?'ok':'blue'}">${esc(srcLabel(r.source_provider))}</span>` : ''}
       <button class="btn" onclick="toggleReport(${r.id})">详情</button>
       <button class="btn" onclick="delReport(${r.id})">删</button>
@@ -451,6 +600,7 @@ async function loadSettings() {
   $('setTikhubKey').value = '';
   $('setTikhubKey').placeholder = tk.api_key ? '已保存（' + tk.api_key + '），留空不修改' : 'Bearer Token';
   $('setMaxCalls').value = hv.max_calls || 60;
+  $('setCommentPages').value = hv.comment_pages || 3;
   await loadSeeds();
   $('tplEditor').innerHTML = STATE.templates.map((t,i)=>`
     <div class="tplrow"><b>${esc(t.name)}</b>
@@ -479,7 +629,8 @@ async function saveSettings() {
     auth:{enabled:authOn, username:$('setAuthUser').value.trim() || 'boss'},
     search:{provider:$('setProvider').value,
             tikhub:{base_url:$('setTikhubUrl').value.trim()}},
-    harvest:{max_calls:+$('setMaxCalls').value || 60}
+    harvest:{max_calls:+$('setMaxCalls').value || 60,
+             comment_pages:+$('setCommentPages').value || 3}
   };
   if ($('setLlmKey').value) data.llm.api_key = $('setLlmKey').value;
   if ($('setAsrKey').value) data.asr.api_key = $('setAsrKey').value;
@@ -520,6 +671,25 @@ async function testProvider() {
       '｜返回 ' + r.items + ' 条｜消耗 ' + r.cost_calls + ' 次调用' +
       (sample ? '\n样例：' + sample : '');
     await loadProviders();
+  } catch (e) {
+    box.textContent = '✗ 测试失败：' + e.message;
+  } finally { btn.disabled = false; }
+}
+
+async function testLLM() {
+  const btn = $('btnTestLlm'), box = $('llmTestMsg');
+  btn.disabled = true;
+  box.textContent = '正在保存设置并发起 1 次测试调用…';
+  try {
+    if (!await saveSettings()) { box.textContent = '设置保存失败，无法测试'; return; }
+    const r = await api('/api/llm/test', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({})
+    });
+    box.textContent = r.ok
+      ? `✓ ${r.message}｜模型 ${r.model}｜回复 ${r.reply || 'OK'}`
+      : `✗ ${r.message}｜模型 ${r.model || '—'}\n${r.error || ''}\n` +
+        '若提示模型不存在，把上面「模型名」改成上游实际支持的名称即可，其余代码不用动。';
   } catch (e) {
     box.textContent = '✗ 测试失败：' + e.message;
   } finally { btn.disabled = false; }
