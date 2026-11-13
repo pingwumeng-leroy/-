@@ -95,7 +95,19 @@
     <p class="tip">没有视频素材也能先手工补经验，第 3 步照样能生成文案。</p>
   </div>
   <h3 class="sub">采集任务历史</h3>
+  <div class="listbar">
+    <label for="hvLimit">显示</label>
+    <select id="hvLimit" onchange="loadHarvestJobs()">
+      <option value="3">最近 3 条</option>
+      <option value="10">最近 10 条</option>
+      <option value="0">全部记录</option>
+    </select>
+    <span class="mini" id="hvCountTip"></span>
+    <span class="grow"></span>
+    <button class="btn mini danger" onclick="clearHarvestJobs()">清空记录</button>
+  </div>
   <div class="list" id="harvestList"></div>
+  <div id="harvestMore"></div>
   <h3 class="sub">分析报告 · 经验库</h3>
   <div class="list" id="reportList"></div>
 </section>

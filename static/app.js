@@ -417,16 +417,63 @@ function pollHarvest(id) {
     } catch (e) { clearInterval(HPOLL); $('btnHarvest').disabled = false; }
   }, 1200);
 }
+/* ---------- 采集任务历史：默认 3 条，其余靠下拉 / 展开 ---------- */
+let HV = {list: [], limit: 3};
 async function loadHarvestJobs() {
-  const list = await api('/api/harvest');
-  $('harvestList').innerHTML = list.length ? list.map(j => `
+  const list = await api('/api/harvest?limit=5000');
+  HV.list = Array.isArray(list) ? list : [];
+  const sel = $('hvLimit');
+  if (sel) HV.limit = parseInt(sel.value, 10);
+  if (!Number.isFinite(HV.limit) || HV.limit < 0) HV.limit = 3;
+  renderHarvestJobs();
+}
+function renderHarvestJobs() {
+  const all = HV.list;
+  const shown = HV.limit === 0 ? all : all.slice(0, HV.limit);
+  $('harvestList').innerHTML = shown.length ? shown.map(j => `
     <div class="item"><div class="body">
       <div class="t">任务 #${j.id} · ${esc((j.input_text || '').slice(0, 40))}</div>
       <div class="d">${esc(j.provider)} · 候选 ${j.found} / 入库 ${j.imported} / 调用 ${j.cost_calls} · ${esc(j.created_at)}</div>
     </div><div class="acts">
-      <span class="pill ${j.status==='done'?'ok':(j.status==='failed'?'warn':'blue')}">${j.status}</span>
-      <button class="btn" onclick="watchHarvest(${j.id})">看日志</button>
+      <span class="pill ${j.status==='done'?'ok':(j.status==='failed'?'warn':'blue')}">${esc(j.status)}</span>
+      <button class="btn mini" onclick="watchHarvest(${j.id})">看日志</button>
+      <button class="btn mini danger" onclick="deleteHarvestJob(${j.id})">删除</button>
     </div></div>`).join('') : '<div class="empty">还没有采集任务。在上面输入一段文字即可开始。</div>';
+  const tip = $('hvCountTip');
+  if (tip) tip.textContent = `共 ${all.length} 条 · 当前显示 ${shown.length} 条`;
+  const more = all.length - shown.length;
+  const box = $('harvestMore');
+  if (box) box.innerHTML = more > 0
+    ? `<button class="btn" onclick="expandHarvest()">▾ 展开其余 ${more} 条</button>`
+    : (all.length > 3 && HV.limit === 0
+        ? `<button class="btn" onclick="collapseHarvest()">▴ 收起，只看最近 3 条</button>` : '');
+}
+function expandHarvest() {
+  const sel = $('hvLimit'); if (sel) sel.value = '0';
+  HV.limit = 0; renderHarvestJobs();
+}
+function collapseHarvest() {
+  const sel = $('hvLimit'); if (sel) sel.value = '3';
+  HV.limit = 3; renderHarvestJobs();
+}
+async function deleteHarvestJob(id) {
+  if (!confirm(`删除采集任务 #${id} 的记录？\n\n只删这条任务记录，已入库的分析报告不受影响。`)) return;
+  try {
+    await api(`/api/harvest/${id}`, {method:'DELETE'});
+    toast(`任务 #${id} 记录已删除`);
+    await loadHarvestJobs();
+  } catch (e) { toast('删除失败：' + e.message); }
+}
+async function clearHarvestJobs() {
+  if (!HV.list.length) return toast('没有可清空的记录');
+  if (!confirm(`清空采集任务历史（共 ${HV.list.length} 条）？\n\n· 只删任务记录，已入库的分析报告 / 文案 / 成片都不受影响\n· 正在运行的任务会保留，等它结束再清`)) return;
+  try {
+    const r = await api('/api/harvest/clear', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({confirm:'CLEAR'})});
+    toast(`已清空 ${r.deleted} 条` + (r.kept ? `，${r.kept} 条运行中已保留` : ''));
+    await loadHarvestJobs();
+  } catch (e) { toast('清空失败：' + e.message); }
 }
 async function watchHarvest(id) {
   const j = await api(`/api/harvest/${id}`);
