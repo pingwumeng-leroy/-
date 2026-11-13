@@ -67,7 +67,8 @@ DEFAULT_SETTINGS = {
         "max_calls": 60,
         "comment_pages": 3,
         "use_asr": False,
-        "_hint": "单次批量任务的默认报告数与调用预算上限；comment_pages 为每条视频的评论翻页数（官方每页固定 20 条，每翻一页计费一次）；use_asr 预留给 dtk 离线转写的完整档。"
+        "whisper_model": "small",
+        "_hint": "单次批量任务的默认报告数与调用预算上限；comment_pages 为每条视频的评论翻页数（官方每页固定 20 条，每翻一页计费一次）；use_asr 开启完整档：用 TikHub play_url 下载视频 → ffmpeg 抽音频 → 本地 faster-whisper 转写带时间戳 SRT（需 pip install faster-whisper，模型约 500MB）；whisper_model 可选 tiny/base/small/medium，越大越准越慢；下载或转写失败自动回落轻量档，不影响整批任务。"
     }
 }
 

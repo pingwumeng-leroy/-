@@ -1,0 +1,171 @@
+# -*- coding: utf-8 -*-
+"""逐字稿：带时间戳 SRT 的本地生成与规则分析。
+
+做法移植自用户 dy- 仓库 analyze_douyin.py 的
+    transcribe_with_whisper() → load_transcript() → analyze_transcript()
+用本地 faster-whisper（int8）转写，不依赖云端 ASR、不花 API 费用。
+DeepSeek 只有 /chat/completions，没有 /audio/transcriptions，
+所以这条链路不能复用 llm.asr_transcribe()。
+
+关键：逐字稿必须是「带时间戳的 SRT」，不是纯文本 —— 前 3 秒原话、
+语速、信息密度曲线全部依赖 start/end，纯文本算不出来。
+"""
+import os
+import re
+from pathlib import Path
+
+from . import config
+
+SRT_TIME = re.compile(
+    r"(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)")
+CJK = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]")
+WORD = re.compile(r"[A-Za-z]+(?:'[A-Za-z]+)?|\d+(?:\.\d+)?")
+
+HOOK_TYPES = {
+    "提问/悬念": ["为什么", "怎么", "如何", "你知道", "有没有想过", "到底", "？", "?"],
+    "反常识": ["其实", "并不是", "恰恰相反", "没想到", "竟然", "居然", "错了"],
+    "痛点/共鸣": ["困扰", "很多人", "你是不是", "总是", "一直"],
+    "利益承诺": ["教你", "学会", "看完", "只需", "方法", "技巧"],
+    "权威/身份": ["我是", "教授", "得主", "研究", "科学家"],
+    "数字/具体": [str(i) for i in range(10)],
+}
+
+# faster-whisper 模型按规格缓存，批量采集 5 条只加载一次
+_MODEL_CACHE = {}
+
+
+def srt_ts(t):
+    ms = int(round(float(t) * 1000))
+    h, ms = divmod(ms, 3600000)
+    m, ms = divmod(ms, 60000)
+    s, ms = divmod(ms, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def parse_srt_timed(text):
+    """把 SRT/VTT 文本解析成带时间戳的段；纯文本则 timed=False。"""
+    text = text or ""
+    segs = []
+    if SRT_TIME.search(text):
+        for block in re.split(r"\n\s*\n", text.strip()):
+            m = SRT_TIME.search(block)
+            if not m:
+                continue
+            g = [int(x) for x in m.groups()]
+            start = g[0] * 3600 + g[1] * 60 + g[2] + g[3] / 1000.0
+            end = g[4] * 3600 + g[5] * 60 + g[6] + g[7] / 1000.0
+            lines = [ln for ln in block.splitlines()
+                     if ln.strip() and not SRT_TIME.search(ln) and not ln.strip().isdigit()]
+            body = "".join(ln.strip() for ln in lines).strip()
+            if body:
+                segs.append({"start": start, "end": end, "text": body})
+        if segs:
+            return {"timed": True, "segments": segs,
+                    "full": "".join(s["text"] for s in segs)}
+    plain = re.sub(r"<[^>]+>", "", text)
+    plain = re.sub(r"\s+", "", plain)
+    return {"timed": False, "segments": [], "full": plain.strip()}
+
+
+def load_transcript(path):
+    if not path or not Path(path).exists():
+        return None
+    raw = Path(path).read_text(encoding="utf-8", errors="ignore")
+    tr = parse_srt_timed(raw)
+    return tr if tr["full"] else None
+
+
+def text_units(s):
+    """说了多少「字」：中文按字，英文按词，数字按串（与 dy- 口径一致）。"""
+    return len(CJK.findall(s or "")) + len(WORD.findall(s or ""))
+
+
+def classify_hook(text):
+    return [k for k, ws in HOOK_TYPES.items() if any(w in (text or "") for w in ws)]
+
+
+def analyze_transcript(tr, duration):
+    """从带时间戳的逐字稿算第四章的全部量化指标。无稿返回 None。"""
+    if not tr or not tr.get("full"):
+        return None
+    full = tr["full"]
+    units = text_units(full)
+    r = {"chars": units, "timed": bool(tr.get("timed")),
+         "segments_count": len(tr.get("segments") or []),
+         "hook_3s": "", "hook_15s": "", "speech_rate_cpm": None,
+         "density_curve": [], "long_gaps": 0, "hook_types": []}
+
+    def join(parts):
+        out = ""
+        for p in parts:
+            p = (p or "").strip()
+            if out and re.search(r"[A-Za-z0-9.,!?'\"]$", out) and re.match(r"[A-Za-z0-9]", p):
+                out += " "
+            out += p
+        return out.strip()
+
+    segs = tr.get("segments") or []
+    if r["timed"] and segs:
+        r["hook_3s"] = join(s["text"] for s in segs if s["start"] < 3) or segs[0]["text"]
+        r["hook_15s"] = join(s["text"] for s in segs if s["start"] < 15)
+        speak_time = sum(s["end"] - s["start"] for s in segs)
+        if speak_time > 0:
+            r["speech_rate_cpm"] = round(units / (speak_time / 60), 1)
+        total = duration or segs[-1]["end"] or 1
+        buckets = [0] * 10
+        for s in segs:
+            idx = min(int(s["start"] / total * 10), 9)
+            buckets[idx] += text_units(s["text"])
+        r["density_curve"] = buckets
+        r["long_gaps"] = sum(
+            1 for i in range(len(segs) - 1)
+            if segs[i + 1]["start"] - segs[i]["end"] > 3)
+        r["duration_used"] = round(total, 1)
+    else:
+        r["hook_3s"] = full[:15]
+        r["hook_15s"] = full[:70]
+        if duration:
+            r["speech_rate_cpm"] = round(units / (duration / 60), 1)
+    r["hook_types"] = classify_hook(r["hook_15s"])
+    return r
+
+
+def transcribe_video(video_path, out_dir, model_size="small"):
+    """本地 faster-whisper 转写，生成带时间戳 transcript.srt，返回路径。
+
+    国内服务器常拉不到 HuggingFace，默认走 hf-mirror；模型缓存放在
+    data/hf_cache（已 gitignore），避免 www-data 没有 home 写权限。
+    两者都允许用外部环境变量覆盖。
+    """
+    os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+    os.environ.setdefault("HF_HOME", os.path.join(config.DATA, "hf_cache"))
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError as exc:
+        raise RuntimeError(
+            "未安装 faster-whisper：在服务器执行 "
+            "sudo /opt/douyin-studio/.venv/bin/pip install faster-whisper") from exc
+
+    from . import ingest  # 局部导入，避免与 ingest 形成顶层循环
+    os.makedirs(out_dir, exist_ok=True)
+    wav = os.path.join(out_dir, "asr_audio.wav")
+    srt = os.path.join(out_dir, "transcript.srt")
+    ingest.extract_audio(video_path, wav)
+    try:
+        if model_size not in _MODEL_CACHE:
+            _MODEL_CACHE[model_size] = WhisperModel(
+                model_size, device="auto", compute_type="int8")
+        model = _MODEL_CACHE[model_size]
+        segments, _info = model.transcribe(
+            wav, language="zh", vad_filter=True,
+            initial_prompt="以下是普通话的句子，使用简体中文。")
+        with open(srt, "w", encoding="utf-8") as fh:
+            for i, seg in enumerate(segments, 1):
+                fh.write(f"{i}\n{srt_ts(seg.start)} --> {srt_ts(seg.end)}\n"
+                         f"{seg.text.strip()}\n\n")
+    finally:
+        try:
+            os.remove(wav)
+        except OSError:
+            pass
+    return srt
