@@ -34,6 +34,24 @@ Creator API 只准备「素材 + 配音 + 编排」，**成片仍在本机渲染
 
 > 没有 `.motion` 包也能用 TTS 模式先出片；有了真包再切「MotionGit 模板」出精细动效。未配置 Key 时，配音自动回落 edge-tts（免费）。
 
+### .motion 包运行前提
+
+模板包自带 `adapter.py`（PEP-723 内联声明 5 个依赖：numpy / scipy / soundfile / pyloudnorm / jsonschema）和无头浏览器渲染脚本。服务端会：
+
+1. 优先找一个**已装齐这些依赖的解释器**直接跑 `adapter.py`；找不到才回退 `uv run --no-project`。
+2. 用 `plan → prepare → render` 三步跑通，校验是 `params.schema.json` + `integrity.json`，所以**缺文件的包会立刻报错并列出缺什么**，不会静默失败。
+
+服务器建议预装依赖，避免首次出片卡在下载（numpy+scipy 约 50MB，慢网下会等很久）：
+
+```bash
+sudo apt install -y python3-pip
+sudo python3 -m pip install --break-system-packages \
+  -i https://mirrors.aliyun.com/pypi/simple/ \
+  numpy scipy soundfile pyloudnorm jsonschema
+```
+
+> 若包显示「⚠ 不完整」，说明 .motion 下载被截断（常见于网络断流），重新下载完整包再上传即可。
+
 ## 本地快速启动
 
 ```bash

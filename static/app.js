@@ -812,7 +812,7 @@ async function loadMotionPackages() {
     $('motionScenes').innerHTML = '<span class="muted">先上传模板包</span>';
     return;
   }
-  sel.innerHTML = MOTION_PKGS.map(m => `<option value="${esc(m.name)}">${esc(m.name)}（${esc(m.profile||'?')}）</option>`).join('');
+  sel.innerHTML = MOTION_PKGS.map(m => `<option value="${esc(m.name)}">${esc(m.name)}（${esc(m.profile||'?')}）${m.complete===false?' ⚠ 不完整':''}</option>`).join('');
   onMotionPkg();
 }
 function onMotionPkg() {
@@ -820,7 +820,10 @@ function onMotionPkg() {
   const m = MOTION_PKGS.find(x => x.name === name);
   if (!m) return;
   const layouts = (m.layouts || []).join('/') || '?';
-  $('motionPkgMeta').innerHTML = `入口 <b>${esc(m.entry||'—')}</b>｜画幅 ${esc(layouts)}｜场景 ${(m.scenes||[]).length} 个｜配音槽 ${esc((m.voice_modes||[]).join('/'))}` +
+  const warn = (m.complete === false)
+    ? `<div class="mgwarn">⚠ 包不完整，缺少 <b>${esc((m.missing||[]).join('、'))}</b>。这份多半是下载被截断，请重新从 MotionGit 官网下载完整 .motion 再上传，否则无法出片。</div>`
+    : '';
+  $('motionPkgMeta').innerHTML = warn + `入口 <b>${esc(m.entry||'—')}</b>｜画幅 ${esc(layouts)}｜场景 ${(m.scenes||[]).length} 个｜配音槽 ${esc((m.voice_modes||[]).join('/'))}` +
     (m.notes && m.notes.length ? `<br><span class="muted">${esc(m.notes.join('；'))}</span>` : '');
   const sc = m.scenes || [];
   $('motionScenes').innerHTML = sc.length ? sc.map(s => `

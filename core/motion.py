@@ -18,6 +18,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import zipfile
 from PIL import Image, ImageDraw
@@ -172,6 +173,27 @@ class MotionPackage:
     def has_engine(self):
         return self.meta.get("entry") in ("adapter.py", "render.mjs", "index.html")
 
+    REQUIRED = ("motion.json", "params.schema.json", "integrity.json", "render.mjs")
+
+    def missing_files(self):
+        """判断包是否完整（截断下载/解包失败会缺这些关键文件）。
+
+        adapter 链路真正要跑起来缺一不可：integrity.json 供 adapter 自校验、
+        params.schema.json 供输入校验、render.mjs 供逐帧渲染。
+        index.html 形态的包只要求 index.html。
+        """
+        if self.meta.get("entry") == "index.html":
+            return [] if self._find("index.html") else ["index.html"]
+        miss = []
+        for f in self.REQUIRED:
+            if not self._find(f):
+                miss.append(f)
+        return miss
+
+    @property
+    def complete(self):
+        return not self.missing_files()
+
 
 def list_packages():
     os.makedirs(MOTION_DIR, exist_ok=True)
@@ -180,7 +202,11 @@ def list_packages():
         root = os.path.join(MOTION_DIR, n)
         if os.path.isdir(root) and not n.startswith("."):
             try:
-                out.append(MotionPackage(n, root).meta)
+                pkg = MotionPackage(n, root)
+                meta = pkg.meta
+                meta["missing"] = pkg.missing_files()
+                meta["complete"] = not meta["missing"]
+                out.append(meta)
             except Exception as e:
                 out.append({"name": n, "error": str(e)})
     return out
@@ -280,6 +306,10 @@ def build_input(script, package, opts):
     else:
         ui["scenes"] = sel  # 没有 catalog 时直接透传
 
+    # 包必须真人素材但用户没有：不拦，放进 ui 让渲染阶段给出明确提示
+    if bool(meta.get("requires_presenter")) and not opts.get("presenter"):
+        ui["_notes"] = ["该模板需要真人出镜素材，本次按无真人方式出片，成片可能留空位"]
+
     # ---- basic 表达（B1–B4 等）----
     sents = _sentences(body)
     bullets = _bullets(body)
@@ -341,6 +371,51 @@ def build_input(script, package, opts):
 # ----------------------------------------------------------------------------
 # 3. 渲染：真对接 MotionGit
 # ----------------------------------------------------------------------------
+_PY_CANDIDATES = ("/usr/bin/python3.12", "/usr/bin/python3.11", "/usr/bin/python3",
+                  sys.executable)
+
+# adapter.py 内联声明的依赖（PEP-723 里的 dependencies）
+_ADAPTER_DEPS = ("numpy", "scipy", "soundfile", "pyloudnorm", "jsonschema")
+
+
+def _py_has_deps(py):
+    """这个解释器是否已装齐 adapter 依赖。"""
+    code = "import " + ", ".join(_ADAPTER_DEPS)
+    try:
+        p = subprocess.run([py, "-c", code], capture_output=True, timeout=20)
+        return p.returncode == 0
+    except Exception:
+        return False
+
+
+def _py_exec():
+    """返回能直接跑 adapter.py 的解释器路径；都不行则返回 None（改走 uv）。"""
+    for py in _PY_CANDIDATES:
+        if py and os.path.exists(py) and _py_has_deps(py):
+            return py
+    return None
+
+
+def _adapter_cmd(script="adapter.py"):
+    """adapter 执行前缀。
+
+    首选「依赖已就绪的解释器」直接跑：`uv run` 在网络差的机器上会长时间卡在
+    下载 numpy/scipy（实测 30MB 级 wheel 在慢网下几分钟都不动），而模板包只跑
+    一次配色/合成，不需要隔离环境。依赖没装时才回退 uv（--no-project 避免
+    uv 在服务器目录里找 pyproject 而挂死）。
+    """
+    py = _py_exec()
+    if py:
+        return [py, script]
+    base = ["uv", "run", "--no-project"]
+    for c in _PY_CANDIDATES:
+        if os.path.exists(c):
+            base += ["--python", c]
+            break
+    return base + [script]
+
+
+
 def _run(cmd, cwd, log_fn, timeout=1800):
     p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
     if p.stdout:
@@ -393,6 +468,11 @@ def render_motion(job_id):
         pkg = get_package(pkg_name)
         if not pkg or not pkg.has_engine():
             raise RuntimeError("找不到可用的 MotionGit 包：%s（请先在「设置/模板」上传 .motion）" % pkg_name)
+        miss = pkg.missing_files()
+        if miss:
+            raise RuntimeError(
+                "模板包「%s」不完整，缺少：%s。请重新从 MotionGit 官网下载完整 .motion 再上传"
+                "（缺文件通常是下载被截断）。" % (pkg.name, "、".join(miss)))
         meta = pkg.meta
         _log(job_id, "已载入模板包 %s（%s，画幅 %s）" %
              (pkg.name, meta.get("profile"), "/".join(meta.get("layouts", []))))
@@ -438,16 +518,18 @@ def render_motion(job_id):
 
         if meta["entry"] == "adapter.py":
             # 标准 Python adapter：plan → prepare → render（render 内部调 mix）
-            _run(["uv", "run", "adapter.py", "plan", "--input", user_json,
-                  "--out", plan_out], root, lambda m: _log(job_id, m), timeout=300)
+            uv = _adapter_cmd()
+            _log(job_id, "运行模板适配器（引擎：%s）…" % uv[0])
+            _run(uv + ["adapter.py", "plan", "--input", user_json,
+                       "--out", plan_out], root, lambda m: _log(job_id, m), timeout=600)
             _log(job_id, "plan 校验通过")
             db.update_job(job_id, progress=48)
-            _run(["uv", "run", "adapter.py", "prepare", "--input", user_json,
-                  "--out", instance], root, lambda m: _log(job_id, m), timeout=600)
+            _run(uv + ["adapter.py", "prepare", "--input", user_json,
+                       "--out", instance], root, lambda m: _log(job_id, m), timeout=900)
             db.update_job(job_id, progress=62)
             silent = os.path.join(tmp, "silent.mp4")
-            _run(["uv", "run", "adapter.py", "render", "--instance", instance,
-                  "--out", silent], root, lambda m: _log(job_id, m), timeout=1800)
+            _run(uv + ["adapter.py", "render", "--instance", instance,
+                       "--out", silent], root, lambda m: _log(job_id, m), timeout=1800)
             # adapter 的 render 会再调 mix.py 产出 silent-with-audio.mp4
             produced = os.path.join(tmp, "silent-with-audio.mp4")
             if not os.path.exists(produced):
@@ -463,15 +545,15 @@ def render_motion(job_id):
         if not os.path.exists(produced) or os.path.getsize(produced) < 10000:
             raise RuntimeError("模板未产出有效视频文件")
 
-            out_name = "clip_%d_%s.mp4" % (job_id, meta.get("profile"))
-            out_path = os.path.join(config.OUTPUTS, out_name)
-            shutil.copy2(produced, out_path)
-            odur, _, _ = 0.0, 0, 0
-            try:
-                from . import ingest
-                odur, _, _ = ingest.probe(out_path)
-            except Exception:
-                pass
+        out_name = "clip_%d_%s.mp4" % (job_id, meta.get("profile"))
+        out_path = os.path.join(config.OUTPUTS, out_name)
+        shutil.copy2(produced, out_path)
+        odur, _, _ = 0.0, 0, 0
+        try:
+            from . import ingest
+            odur, _, _ = ingest.probe(out_path)
+        except Exception:
+            pass
         _log(job_id, "完成：%s（%ss，%d KB）" %
              (out_name, odur, os.path.getsize(out_path) // 1024))
         db.update_job(job_id, status="done", progress=100, output_path=out_path,

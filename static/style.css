@@ -79,6 +79,8 @@ textarea{resize:vertical;line-height:1.65}
   padding:9px 14px;border-radius:8px;font-size:12.5px;cursor:pointer;margin-top:8px;transition:.15s}
 .filebtn:hover{border-color:var(--accent2);background:#f3f8ff}
 .filebtn input{display:none}
+.mgwarn{background:#fff6e8;border:1px solid #f0c584;color:#8a5300;border-radius:8px;
+  padding:9px 11px;font-size:12.5px;line-height:1.6;margin-bottom:8px}
 
 .btn{border:1px solid #d9dee7;background:#fff;color:var(--text);padding:9px 15px;border-radius:8px;
   font-size:13px;font-family:inherit;cursor:pointer;transition:.15s;white-space:nowrap}

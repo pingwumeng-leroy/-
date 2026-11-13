@@ -6,6 +6,7 @@
 """
 import base64
 import os
+import re
 import secrets
 import threading
 import traceback
@@ -576,8 +577,10 @@ def api_motion_packages():
     if not f or os.path.splitext(f.filename)[1].lower() != ".motion":
         return err("请上传 .motion 工程包")
     path = ingest.save_upload(f, "motion")
+    raw = os.path.splitext(os.path.basename(f.filename or "package.motion"))[0]
+    pkg_name = re.sub(r"[^\w一-鿿.-]+", "_", raw).strip("_") or None
     try:
-        pkg = motion.MotionPackage.install(path)
+        pkg = motion.MotionPackage.install(path, name=pkg_name)
         return ok(pkg.meta)
     except Exception as exc:
         return err("解包失败：%s" % exc)
