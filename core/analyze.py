@@ -211,19 +211,19 @@ DEEP_SYSTEM = """你是资深抖音内容运营与短视频策略分析师，服
 【字段要求，全部必填】
 {
  "one_line": "一句话说清它为什么火",
- "dimensions": [
-   {"name":"维度名","score":1-10,"finding":"具体发现，引用输入里的真实数字或文案作为证据",
-    "why_it_works":"背后的用户心理/平台机制","reusable":"别人可以怎么复用"}
- ],
  "key_drivers": ["最关键的 3 个爆款因素，按重要性排序"],
- "weaknesses": ["可以做得更好的 2~3 条"],
+ "weaknesses": ["可以做得更好的 2~3 条，禁止空数组"],
  "formula": "可套用的公式，必须是抽象结构，禁止引用原句",
- "next_ideas": ["基于这个公式的 3 个成都/四川财税工商新选题"],
+ "next_ideas": ["基于这个公式的 3 个成都/四川财税工商新选题，禁止空数组"],
  "engagement_insight": "第一章：解读互动数据结构",
  "duration_insight": "第二章：解读时长策略",
  "title_insight": "第三章：解读标题与话题",
  "hook_insight": "第四章：明确写「无逐字稿」，只做基于文案的钩子类型推断",
- "comment_insight": "第六章：解读评论区情绪与传播信号"
+ "comment_insight": "第六章：解读评论区情绪与传播信号",
+ "dimensions": [
+   {"name":"维度名","score":1-10,"finding":"具体发现，引用输入里的真实数字或文案作为证据",
+    "why_it_works":"背后的用户心理/平台机制","reusable":"别人可以怎么复用"}
+ ]
 }
 dimensions 必须依次覆盖且只覆盖这 10 个维度：""" + "、".join(DEEP_DIMENSIONS) + """
 score 只能是 1-10 的整数。finding 必须引用真实数字；没有对应数据的维度，
@@ -265,19 +265,19 @@ DEEP_SYSTEM_TR = """你是资深抖音内容运营与短视频策略分析师，
 【字段要求，全部必填】
 {
  "one_line": "一句话说清它为什么火",
- "dimensions": [
-   {"name":"维度名","score":1-10,"finding":"具体发现，引用输入里的真实数字或原话作为证据",
-    "why_it_works":"背后的用户心理/平台机制","reusable":"别人可以怎么复用"}
- ],
  "key_drivers": ["最关键的 3 个爆款因素，按重要性排序"],
- "weaknesses": ["可以做得更好的 2~3 条"],
+ "weaknesses": ["可以做得更好的 2~3 条，禁止空数组"],
  "formula": "可套用的公式，必须是抽象结构，禁止引用原句",
- "next_ideas": ["基于这个公式的 3 个成都/四川财税工商新选题"],
+ "next_ideas": ["基于这个公式的 3 个成都/四川财税工商新选题，禁止空数组"],
  "engagement_insight": "第一章：解读互动数据结构",
  "duration_insight": "第二章：解读时长策略，结合真实语速",
  "title_insight": "第三章：解读标题与话题",
  "hook_insight": "第四章：引用前 3 秒/15 秒原话，分析钩子类型与讲述节奏",
- "comment_insight": "第六章：解读评论区情绪与传播信号"
+ "comment_insight": "第六章：解读评论区情绪与传播信号",
+ "dimensions": [
+   {"name":"维度名","score":1-10,"finding":"具体发现，引用输入里的真实数字或原话作为证据",
+    "why_it_works":"背后的用户心理/平台机制","reusable":"别人可以怎么复用"}
+ ]
 }
 dimensions 必须依次覆盖且只覆盖这 10 个维度：""" + "、".join(DEEP_DIMENSIONS) + """
 score 只能是 1-10 的整数。finding 必须引用真实数字；没有对应数据的维度，
@@ -469,7 +469,10 @@ def deep_analyze(item, comments, tr=None):
         got_ins = sum(1 for k in ("engagement_insight", "duration_insight",
                                   "title_insight", "hook_insight", "comment_insight")
                       if str(ai.get(k) or "").strip())
-        return got_dims >= 10 and got_ins >= 5
+        got_lists = sum(1 for k in ("key_drivers", "weaknesses", "next_ideas")
+                        if isinstance(ai.get(k), list)
+                        and any(str(x).strip() for x in ai.get(k)))
+        return got_dims >= 10 and got_ins >= 5 and got_lists >= 3
 
     try:
         ai = _call(payload)
