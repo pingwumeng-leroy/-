@@ -741,7 +741,8 @@ async function startRender() {
     if (!pkg) return toast('请先上传并选择一个 .motion 模板包');
     const selected = [...document.querySelectorAll('#motionScenes input:checked')].map(c => c.value);
     const mv = $('motionVoice').value;
-    const opts = {selected};
+    const opts = {selected, layout:$('motionLayout').value,
+                  music_path:$('motionMusic').value.trim()};
     if (mv) { opts.voice = mv; opts.mg_voice = mv; opts.voice_provider = STATE.motiongit ? 'motiongit' : 'edge'; }
     return launchRender({script_id:+sid, render_mode:'motion', motion_package:pkg, motion_input:opts});
   }
@@ -823,12 +824,21 @@ function onMotionPkg() {
   const warn = (m.complete === false)
     ? `<div class="mgwarn">⚠ 包不完整，缺少 <b>${esc((m.missing||[]).join('、'))}</b>。这份多半是下载被截断，请重新从 MotionGit 官网下载完整 .motion 再上传，否则无法出片。</div>`
     : '';
-  $('motionPkgMeta').innerHTML = warn + `入口 <b>${esc(m.entry||'—')}</b>｜画幅 ${esc(layouts)}｜场景 ${(m.scenes||[]).length} 个｜配音槽 ${esc((m.voice_modes||[]).join('/'))}` +
+  const kitNote = m.kit
+    ? `<div class="tip">这是 motion-kit 包（官网现行格式）：镜头由文案自动编排，成片在<b>本机渲染、不消耗积分</b>。右上角时间码 / .m 角标是模板自带设计。</div>`
+    : '';
+  $('motionPkgMeta').innerHTML = warn + kitNote + `入口 <b>${esc(m.entry||'—')}</b>｜画幅 ${esc(layouts)}｜场景 ${(m.scenes||[]).length} 个｜配音槽 ${esc((m.voice_modes||[]).join('/'))}` +
     (m.notes && m.notes.length ? `<br><span class="muted">${esc(m.notes.join('；'))}</span>` : '');
   const sc = m.scenes || [];
   $('motionScenes').innerHTML = sc.length ? sc.map(s => `
     <label><input type="checkbox" value="${esc(s.id)}" checked/> ${esc(s.id)} ${s.start!=null?`<span class="muted">(${s.start}s–${s.end}s)</span>`:''}</label>`).join('')
     : '<span class="muted">该包未声明原生场景，将按内容自动编排</span>';
+  // kit 包：配音走模板自带 TTS（要积分），当前版本只出画面 + 可选配乐
+  const vs = $('motionVoice');
+  if (vs) {
+    vs.disabled = !!m.kit;
+    vs.title = m.kit ? 'kit 包的配音需要 MotionGit 积分，当前账户为 0 时请用配乐版' : '';
+  }
 }
 async function uploadMotion(file) {
   const fd = new FormData(); fd.append('file', file);

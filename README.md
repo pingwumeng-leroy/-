@@ -32,25 +32,60 @@ Creator API 只准备「素材 + 配音 + 编排」，**成片仍在本机渲染
 
 调用链：`POST /api/v1/quotes`（报价）→ `POST /api/v1/generations`（提交，带 `Idempotency-Key`）→ `GET /api/v1/tasks/{id}`（轮询）→ `GET /api/v1/assets/{id}/download`（下载）。鉴权统一 `Authorization: Bearer <Key>`。
 
+**API 不负责剪辑/渲染。** 边界很清楚：
+
+| 环节 | 谁来做 | 是否耗积分 |
+|---|---|---|
+| 找图/找视频/贴纸/音乐库检索 | Creator API | 0（每账号每天 30 次） |
+| 配音 TTS 2.0 | Creator API | 5 / 100 字 |
+| 生图、生成视频 | Creator API | 4/张、20/条 |
+| 编排（文案→分镜参数） | Creator API `motion.compose` | 12 / 次，**目前仅受邀账号** |
+| **出成片（渲染 mp4）** | 本机，包内引擎 | 0 |
+
+所以「直接调 API 出片」这条路不存在——API 只准备素材、配音、编排，最后一帧一帧的渲染必须在本机跑。好处是渲染免费、可无限次重跑；代价是服务器要能吃下 Node 22 + 无头渲染。
+
 > 没有 `.motion` 包也能用 TTS 模式先出片；有了真包再切「MotionGit 模板」出精细动效。未配置 Key 时，配音自动回落 edge-tts（免费）。
 
 ### .motion 包运行前提
 
-模板包自带 `adapter.py`（PEP-723 内联声明 5 个依赖：numpy / scipy / soundfile / pyloudnorm / jsonschema）和无头浏览器渲染脚本。服务端会：
+模板包有两代结构，工作台会自动识别（上传即可，无需手动选类型）：
 
-1. 优先找一个**已装齐这些依赖的解释器**直接跑 `adapter.py`；找不到才回退 `uv run --no-project`。
-2. 用 `plan → prepare → render` 三步跑通，校验是 `params.schema.json` + `integrity.json`，所以**缺文件的包会立刻报错并列出缺什么**，不会静默失败。
+| 包类型 | 特征 | 执行方式 |
+|---|---|---|
+| **motion-kit**（官网现行） | `motion.json` + `assistant/motion.mjs` + `content/release.bin` | 调用包内官方助手 `start→new→setup→check→plan→prepare→preview→render`，本机出片 |
+| **python-adapter**（旧） | `adapter.py` + `params.schema.json` | 直接跑 `adapter.py plan/prepare/render` |
 
-服务器建议预装依赖，避免首次出片卡在下载（numpy+scipy 约 50MB，慢网下会等很久）：
+motion-kit 包的要点：
+
+- **渲染在本机完成，不消耗任何积分**；账户积分为 0 也能出片。
+- 原包整份保留为 `data/motion/<名>/package.motion`，只解出 `assistant/` 供执行，`personal/`（含 Key）与 `content/release.bin` 不落地成明文。
+- 镜头由文案自动编排（关键词→控件：标题/要点/步骤/对比/名词解释/提示/数字/CTA/片尾），一条片子至少 6 种控件。
+- 官网现行包需要 **Node 22+**；旧的 adapter 包需要 Python 依赖（见下）。
+- 模板右上角的时间码与 `.m 角标` 是模板官方设计（time corner），不是可去的水印。
+
+旧 adapter 包的依赖：
 
 ```bash
-sudo apt install -y python3-pip
 sudo python3 -m pip install --break-system-packages \
   -i https://mirrors.aliyun.com/pypi/simple/ \
   numpy scipy soundfile pyloudnorm jsonschema
 ```
 
+**ffmpeg 必须带 `libx264`**（kit 包的官方助手固定用 `libx264` 编码；Ubuntu 自带的精简构建常常没有）。自检：
+
+```bash
+ffmpeg -hide_banner -encoders | grep libx264     # 有输出才合格
+```
+
+如果缺，最快的补法（走国内镜像，约 30 秒）：
+
+```bash
+sudo python3 -m pip install --break-system-packages -i https://mirrors.aliyun.com/pypi/simple/ imageio-ffmpeg
+sudo cp /usr/local/lib/python3.12/dist-packages/imageio_ffmpeg/binaries/ffmpeg-linux-x86_64-* /usr/local/bin/ffmpeg
+```
+
 > 若包显示「⚠ 不完整」，说明 .motion 下载被截断（常见于网络断流），重新下载完整包再上传即可。
+
 
 ## 本地快速启动
 

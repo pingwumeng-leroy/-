@@ -262,6 +262,13 @@
         <div id="motionPkgMeta" class="tip">还没有模板包。把在 MotionGit 官网下载的 .motion 上传到这里即可真对接出片。</div>
         <label>选用场景（原生单元）</label>
         <div id="motionScenes" class="checks"><span class="muted">先选模板包</span></div>
+        <label>画幅</label>
+        <select id="motionLayout">
+          <option value="landscape">横屏 1920×1080</option>
+          <option value="portrait">竖屏 1080×1920（抖音）</option>
+        </select>
+        <label>配乐（可选）</label>
+        <input id="motionMusic" placeholder="留空＝无配乐；也可填服务器上的音频文件绝对路径"/>
         <label>配音音色</label>
         <select id="motionVoice">
           <option value="">不配音（模板原声/静音）</option>

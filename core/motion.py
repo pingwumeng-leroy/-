@@ -23,7 +23,7 @@ import threading
 import zipfile
 from PIL import Image, ImageDraw
 
-from . import config, db, tts, motiongit
+from . import config, db, tts, motiongit, motionkit
 from .editor import _font, _hex, _wrap  # 复用字体/换行/取色工具
 
 MOTION_DIR = os.path.join(config.DATA, "motion")
@@ -44,7 +44,13 @@ class MotionPackage:
 
     @classmethod
     def install(cls, motion_path, name=None):
-        """解包一个 .motion 到 data/motion/<name>/。返回 MotionPackage。"""
+        """安装一个 .motion 到 data/motion/<name>/。返回 MotionPackage。
+
+        两种包结构分开处理：
+          * motion-kit（官网现在发的）：原包整份留存为 package.motion，只解出
+            assistant/ 与文档，交给 core/motionkit.py 用官方助手执行；
+          * python-adapter（旧）：整包解出来，直接跑包内 adapter.py。
+        """
         os.makedirs(MOTION_DIR, exist_ok=True)
         name = name or re.sub(r"[^\w一-鿿-]+", "_",
                               os.path.splitext(os.path.basename(motion_path))[0]).strip("_") or "package"
@@ -52,6 +58,12 @@ class MotionPackage:
         if os.path.exists(dest):
             shutil.rmtree(dest)
         os.makedirs(dest, exist_ok=True)
+
+        mj = motionkit.read_motion_json(motion_path)
+        if motionkit.is_kit(mj):
+            motionkit.install(motion_path, dest)
+            return cls(name, dest)
+
         with zipfile.ZipFile(motion_path) as z:
             z.extractall(dest)
         # 有些包首层套一个同名目录，拉平一层，方便找 adapter/params
@@ -82,6 +94,30 @@ class MotionPackage:
                 "voice_modes": ["none", "file"], "music_modes": ["none", "file"],
                 "scenes": [], "content_fields": [], "basic_keys": [],
                 "params_schema": None, "notes": []}
+        # ---- motion-kit 包（官网现行格式，走官方助手）----
+        mj_path = os.path.join(self.root, "motion.json")
+        if motionkit.helper_path(self.root) and os.path.exists(mj_path):
+            try:
+                mj = json.load(open(mj_path, encoding="utf-8"))
+            except Exception:
+                mj = None
+            if motionkit.is_kit(mj):
+                ext = motionkit.entry_of(mj)
+                meta["profile"] = "motion-kit"
+                meta["entry"] = os.path.relpath(
+                    motionkit.helper_path(self.root), self.root)
+                meta["kit"] = True
+                meta["helper_version"] = (ext or {}).get("profile", "")
+                meta["layouts"] = ["landscape", "portrait"]
+                meta["requires_presenter"] = False
+                meta["notes"].append("motion-kit 包：由包内官方助手渲染，成片本机生成、不耗积分")
+                ds = (mj.get("personality") or {}) if isinstance(mj, dict) else {}
+                stage = ((mj.get("extensions") or {})
+                         .get("motiongit.com:delivery-stage") or {})
+                if stage.get("templateVersion"):
+                    meta["template_version"] = stage["templateVersion"]
+                return meta
+
         # ---- 入口：三类运行时，优先级 adapter > render.mjs > index.html ----
         if os.path.exists(os.path.join(self.root, "adapter.py")):
             meta["entry"] = "adapter.py"
@@ -171,6 +207,9 @@ class MotionPackage:
         return meta
 
     def has_engine(self):
+        if self.meta.get("kit"):
+            return bool(motionkit.helper_path(self.root) and
+                        motionkit.package_path(self.root))
         return self.meta.get("entry") in ("adapter.py", "render.mjs", "index.html")
 
     REQUIRED = ("motion.json", "params.schema.json", "integrity.json", "render.mjs")
@@ -182,6 +221,13 @@ class MotionPackage:
         params.schema.json 供输入校验、render.mjs 供逐帧渲染。
         index.html 形态的包只要求 index.html。
         """
+        if self.meta.get("kit"):
+            miss = []
+            if not motionkit.package_path(self.root):
+                miss.append("package.motion")
+            if not motionkit.helper_path(self.root):
+                miss.append("assistant/motion.mjs")
+            return miss
         if self.meta.get("entry") == "index.html":
             return [] if self._find("index.html") else ["index.html"]
         miss = []
@@ -476,6 +522,17 @@ def render_motion(job_id):
         meta = pkg.meta
         _log(job_id, "已载入模板包 %s（%s，画幅 %s）" %
              (pkg.name, meta.get("profile"), "/".join(meta.get("layouts", []))))
+
+        # motion-kit 包：交给官方助手执行，控件编排由 motionkit 负责
+        if meta.get("kit"):
+            opts = job.get("motion_input") or {}
+            if isinstance(opts, str):
+                opts = json.loads(opts or "{}")
+            out_path, dur, params = motionkit.render(
+                job_id, pkg.root, log=lambda m: _log(job_id, m))
+            db.update_job(job_id, status="done", progress=100, output_path=out_path,
+                          finished_at=db.now())
+            return
 
         db.update_job(job_id, progress=12)
         # 生成配音（若需要）
