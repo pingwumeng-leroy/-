@@ -76,7 +76,7 @@ def _build_transcript(item, comments):
     """
     parts = [item.get("desc") or item.get("title") or ""]
     if comments:
-        parts.append("评论区常问：" + "；".join(c["text"] for c in comments[:5]))
+        parts.append("评论区常问：" + "；".join((c.get("text") or "") for c in comments[:5]))
     return "\n".join(p for p in parts if p).strip()
 
 
@@ -96,6 +96,8 @@ def run_harvest(jid):
     publish_days = int(_pd) if _pd is not None else 180
     max_calls = int(params.get("max_calls") or 60)
     pages = int(params.get("pages_per_keyword") or 2)
+    comment_pages = int(params.get("comment_pages") or
+                        config.get_settings().get("harvest", {}).get("comment_pages", 3))
     use_fallback = bool(params.get("use_seed_fallback", True))
 
     provider = providers.get_provider(job.get("provider"))
@@ -185,24 +187,41 @@ def run_harvest(jid):
                 _log(jid, 100, lines, "任务被手动停止，已入库报告保留")
                 break
             try:
-                try:
-                    cres = provider.comments(item["aweme_id"])
-                    comments = cres.get("items", [])
-                except providers.ProviderError:
-                    comments = fallback.comments(item["aweme_id"]).get("items", [])
+                # 评论翻页同样计费：每页一次调用，必须受 max_calls 预算约束
+                budget_left = max(0, max_calls - cost_calls)
+                cpages = min(comment_pages, budget_left)
+                if cpages <= 0:
+                    comments = []
+                    _log(jid, 50, lines, "调用预算已用完，跳过评论采集")
+                else:
+                    try:
+                        cres = provider.comments(item["aweme_id"], max_pages=cpages)
+                        comments = cres.get("items", [])
+                        cost_calls += cres.get("cost_calls", 0)
+                    except providers.ProviderError:
+                        comments = fallback.comments(item["aweme_id"]).get("items", [])
                 # 用 .get() 取字段：第三方 provider 或手工导入的 item 可能缺列，
                 # 不应因为一个可选字段让整条视频的分析全部失败。
                 title = item.get("title") or item.get("desc") or "未命名视频"
                 likes = item.get("digg_count") or 0
                 transcript = _build_transcript(item, comments)
-                report = analyze.rule_analyze(title, transcript, meta={
-                    "likes": likes, "author": item.get("author") or "",
-                    "publish_time": item.get("publish_time") or 0,
-                })
-                if comments:
+                meta = {"likes": likes, "author": item.get("author") or "",
+                        "publish_time": item.get("publish_time") or 0,
+                        "duration": item.get("duration") or 0}
+                engine = "rule"
+                if llm.available():
+                    try:
+                        report = analyze.deep_analyze(item, comments)
+                        engine = "llm"
+                    except Exception as exc:
+                        _log(jid, 50, lines, "AI 十维分析失败，回落规则引擎：%s" % str(exc)[:100])
+                        report = analyze.rule_analyze(title, transcript, meta)
+                else:
+                    report = analyze.rule_analyze(title, transcript, meta)
+                if comments and engine != "llm":
                     report["top_comments"] = [c["text"] for c in comments[:5]]
                 src = provider.name + ("(fallback)" if degraded else "")
-                db.add_harvest_report(report, item, jid, src)
+                db.add_harvest_report(report, item, jid, src, engine=engine)
                 imported += 1
             except Exception as exc:
                 errors += 1
@@ -210,8 +229,9 @@ def run_harvest(jid):
                      "第 %d 条分析失败（已跳过）：%s" % (i + 1, str(exc)[:100]))
                 continue
             _log(jid, 50 + int(45 * (i + 1) / max(len(target), 1)), lines,
-                 "已入库 %d/%d：%s（%d 赞）" %
-                 (imported, len(target), title[:26], likes))
+                 "已入库 %d/%d：%s（%d 赞，评论 %d 条，%s）" %
+                 (imported, len(target), title[:26], likes, len(comments),
+                  "AI 十维" if engine == "llm" else "规则引擎"))
 
         db.update_harvest_job(
             jid, status="done", progress=100, imported=imported,
@@ -235,6 +255,7 @@ def start_harvest(text, params=None):
         # 0 = 时间范围「不限」，保留原值，别被 or 兜底成 180
         "publish_days": int(_pd) if _pd is not None else 180,
         "max_calls": int((params or {}).get("max_calls") or s.get("max_calls", 60)),
+        "comment_pages": int((params or {}).get("comment_pages") or s.get("comment_pages", 3)),
         "pages_per_keyword": int((params or {}).get("pages_per_keyword") or 2),
         "likes_mode": (params or {}).get("likes_mode") or "percentile",
         "use_seed_fallback": bool((params or {}).get("use_seed_fallback", True)),

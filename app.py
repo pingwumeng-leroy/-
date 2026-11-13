@@ -331,6 +331,30 @@ def api_provider_test():
                "message": "连接正常" if res.get("items") else "连接正常，但该关键词没有返回视频"})
 
 
+@app.route("/api/llm/test", methods=["POST"])
+def api_llm_test():
+    """大模型连通性自检：确认 base_url / api_key / model 真的被上游接受。
+
+    用户指定的模型名未必是官方公开名，上线前用一次极小调用验证，
+    避免整批采集跑完才发现 404 / model not found。读的是已落盘设置。
+    """
+    s = config.get_settings().get("llm", {})
+    if not llm.available():
+        return ok({"ok": False, "error": "未启用，或 API Key / Base URL 未填写"})
+    try:
+        txt = llm.chat([
+            {"role": "system", "content": "只回复 OK 两个字符。"},
+            {"role": "user", "content": "连通性测试"},
+        ], temperature=0.1, max_tokens=16)
+        return ok({"ok": True, "model": s.get("model", ""),
+                   "reply": str(txt or "").strip()[:40],
+                   "message": "模型可用"})
+    except Exception as exc:
+        return ok({"ok": False, "model": s.get("model", ""),
+                   "error": str(exc)[:200],
+                   "message": "调用失败：核对 Base URL、API Key 与模型名"})
+
+
 @app.route("/api/harvest/start", methods=["POST"])
 def api_harvest_start():
     d = request.get_json(force=True, silent=True) or {}
