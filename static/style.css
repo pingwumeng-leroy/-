@@ -199,4 +199,14 @@ textarea{resize:vertical;line-height:1.65}
 .radarlegend li{margin-bottom:3px;break-inside:avoid}
 .radarlegend b{display:inline-block;width:15px;color:var(--accent)}
 .rpt-foot{padding:10px 18px;background:#fafbfc;color:var(--muted);font-size:11px}
-@media(max-width:720px){.radarbox{grid-template-columns:1fr}.radarlegend{columns:1}}
+/* 第四章：逐字稿前 3 秒 / 15 秒原话、语速、信息密度曲线 */
+.trbox{background:#f8fbff;border:1px solid #d9e6f8;border-radius:8px;padding:11px 13px;margin-bottom:11px}
+.trline{display:grid;grid-template-columns:88px 1fr;gap:9px;align-items:start;margin-bottom:8px;font-size:12.5px}
+.trline .k{color:var(--muted);white-space:nowrap}
+.trline q{quotes:"「" "」";background:#fff;border:1px solid var(--line);border-radius:6px;
+  padding:6px 9px;line-height:1.65;display:block}
+.density{display:grid;gap:4px}
+.drow{display:grid;grid-template-columns:62px 1fr 40px;gap:8px;align-items:center;
+  font-size:11px;color:var(--muted)}
+.drow b{text-align:right;color:#465062}
+@media(max-width:720px){.radarbox,.trline{grid-template-columns:1fr}.radarlegend{columns:1}}

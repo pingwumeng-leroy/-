@@ -287,7 +287,19 @@
     <input id="setMaxCalls" type="number" value="60"/>
     <label>每条视频评论翻页数</label>
     <input id="setCommentPages" type="number" value="3" min="1" max="10"/>
-    <p class="tip">Key 只存在服务器 <code>config/settings.json</code>，页面不回传明文。切到 TikHub 前需验证邮箱并充值，否则返回 403 / 402；失败会自动降级到演示数据。评论每页固定 20 条、每翻一页计费一次，与搜索共用「单次调用预算上限」，预算用完自动跳过评论采集。</p>
+    <label>逐字稿（完整档）</label>
+    <select id="setUseAsr">
+      <option value="false">关闭 · 轻量档（文案 + 评论）</option>
+      <option value="true">开启 · 下载视频并本地转写</option>
+    </select>
+    <label>本地转写模型</label>
+    <select id="setWhisperModel">
+      <option value="tiny">tiny（最快，准确率较低）</option>
+      <option value="base">base</option>
+      <option value="small">small（推荐，与 dy- 一致）</option>
+      <option value="medium">medium（更准，慢 2~3 倍）</option>
+    </select>
+    <p class="tip">Key 只存在服务器 <code>config/settings.json</code>，页面不回传明文。切到 TikHub 前需验证邮箱并充值，否则返回 403 / 402；失败会自动降级到演示数据。评论每页固定 20 条、每翻一页计费一次，与搜索共用「单次调用预算上限」。<b>开启逐字稿</b>后会从 TikHub 的 <code>play_url</code> 下载视频（不额外计费）→ ffmpeg 抽音频 → 本地 faster-whisper 转写带时间戳 SRT，第四章可出前 3 秒原话、语速与信息密度曲线；服务器需先装 <code>faster-whisper</code>（首次约 500MB 模型），下载或转写失败会自动回落轻量档。第五章、第七章仍不生成。</p>
     <div class="row">
       <button class="btn" onclick="testProvider()" id="btnTestProvider">测试数据源连接</button>
     </div>

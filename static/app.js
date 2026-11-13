@@ -201,6 +201,16 @@ function radarSVG(dims) {
     rings + axes + `<polygon points="${area}" class="area"/>` + dots + labels + '</svg>' +
     `<ol class="radarlegend">${legend}</ol>`;
 }
+function densityBars(curve) {
+  const a = Array.isArray(curve) ? curve : [];
+  if (!a.length) return '';
+  const vals = a.map(x => Number(x) || 0);
+  const mx = Math.max.apply(null, vals.concat([1]));
+  return '<div class="density">' + vals.map((v, i) =>
+    `<div class="drow"><span>${i * 10}–${(i + 1) * 10}%</span>` +
+    `<div class="track"><div style="width:${(v / mx * 100).toFixed(1)}%"></div></div>` +
+    `<b>${num(v)}</b></div>`).join('') + '</div>';
+}
 function renderDeepReport(r, R) {
   const ai = R.ai_analysis || {}, f = R.facts || {};
   const e = f.engagement || {}, t = f.title || {}, c = f.comments || null;
@@ -227,6 +237,22 @@ function renderDeepReport(r, R) {
     `<tr><td>${esc(d.name)}</td><td class="num">${num(d.score)}</td>` +
     `<td>${esc(d.finding)}</td><td>${esc(d.why_it_works)}</td><td>${esc(d.reusable)}</td></tr>`).join('');
   const secs = num(f.duration && f.duration.seconds);
+  const trF = f.transcript || null;
+  const trBox = (trF && trF.has_transcript)
+    ? `<div class="trbox">
+        <div class="trline"><span class="k">前 3 秒原话</span><q>${esc(trF.hook_3s || '—')}</q></div>
+        <div class="trline"><span class="k">前 15 秒原话</span><q>${esc(trF.hook_15s || '—')}</q></div>
+        <div class="metrics">
+          <div class="metric"><span>语速</span><b>${trF.speech_rate_cpm == null ? '—' : num(trF.speech_rate_cpm) + ' 字/分'}</b></div>
+          <div class="metric"><span>逐字稿</span><b>${num(trF.chars)} 字</b></div>
+          <div class="metric"><span>长停顿</span><b>${num(trF.long_gaps)} 处</b></div>
+          <div class="metric"><span>钩子类型</span><b style="font-size:12px">${esc((trF.hook_types || []).join('、') || '未检出')}</b></div>
+        </div>
+        <div class="muted" style="margin:10px 0 4px">信息密度曲线（每 10% 时长的字数）</div>
+        ${densityBars(trF.density_curve)}
+        <p class="muted" style="margin:6px 0 0">来源 ${esc(trF.source || '本地转写')} · 共 ${num(trF.segments_count)} 段带时间戳字幕</p>
+      </div>`
+    : `<div class="warnbox">⚠ 轻量档未下载视频、未做语音转写，<b>没有逐字稿</b>。本节仅为基于标题 / 视频文案 / 评论样本的钩子类型推断，不含前 3 秒原话、语速与信息密度曲线。</div>`;
 
   return `<div class="rpt">
     <div class="rpt-top">
@@ -260,7 +286,7 @@ function renderDeepReport(r, R) {
     </section>
     <section class="rpt-sec">
       ${secHead('四', '开头钩子与讲述节奏')}
-      <div class="warnbox">⚠ 轻量档未下载视频、未做语音转写，<b>没有逐字稿</b>。本节仅为基于标题 / 视频文案 / 评论样本的钩子类型推断，不含前 3 秒原话、语速与信息密度曲线。</div>
+      ${trBox}
       <p style="margin:0">规则判定钩子类型：<b>${esc(r.hook_type || '—')}</b></p>
       ${insightBox(ins['4'])}
     </section>
@@ -601,6 +627,8 @@ async function loadSettings() {
   $('setTikhubKey').placeholder = tk.api_key ? '已保存（' + tk.api_key + '），留空不修改' : 'Bearer Token';
   $('setMaxCalls').value = hv.max_calls || 60;
   $('setCommentPages').value = hv.comment_pages || 3;
+  $('setUseAsr').value = String(!!hv.use_asr);
+  $('setWhisperModel').value = hv.whisper_model || 'small';
   await loadSeeds();
   $('tplEditor').innerHTML = STATE.templates.map((t,i)=>`
     <div class="tplrow"><b>${esc(t.name)}</b>
@@ -630,7 +658,9 @@ async function saveSettings() {
     search:{provider:$('setProvider').value,
             tikhub:{base_url:$('setTikhubUrl').value.trim()}},
     harvest:{max_calls:+$('setMaxCalls').value || 60,
-             comment_pages:+$('setCommentPages').value || 3}
+             comment_pages:+$('setCommentPages').value || 3,
+             use_asr:$('setUseAsr').value === 'true',
+             whisper_model:$('setWhisperModel').value}
   };
   if ($('setLlmKey').value) data.llm.api_key = $('setLlmKey').value;
   if ($('setAsrKey').value) data.asr.api_key = $('setAsrKey').value;
