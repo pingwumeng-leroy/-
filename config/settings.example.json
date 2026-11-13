@@ -38,6 +38,7 @@
     "default_count": 15,
     "max_calls": 60,
     "comment_pages": 3,
-    "use_asr": false
+    "use_asr": false,
+    "whisper_model": "small"
   }
 }

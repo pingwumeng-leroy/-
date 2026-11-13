@@ -2,3 +2,6 @@ flask>=3.0
 requests>=2.31
 Pillow>=10.0
 yt-dlp>=2024.1
+# 可选：完整档逐字稿（harvest.use_asr=true 时才需要，默认关闭）
+# 单独安装：sudo .venv/bin/pip install faster-whisper
+# faster-whisper>=1.0
