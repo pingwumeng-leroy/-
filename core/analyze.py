@@ -228,6 +228,14 @@ DEEP_SYSTEM = """你是资深抖音内容运营与短视频策略分析师，服
 dimensions 必须依次覆盖且只覆盖这 10 个维度：""" + "、".join(DEEP_DIMENSIONS) + """
 score 只能是 1-10 的整数。finding 必须引用真实数字；没有对应数据的维度，
 finding 写「本次无该维度原始数据」、score 给 5，不要编造。
+
+【输出格式硬约束 —— 违反会直接导致解析失败】
+- 只输出一个 JSON 对象：不要 markdown 代码块、不要注释、不要缩进换行（紧凑单行）。
+- 每个字符串字段不超过 60 字；finding / why_it_works / reusable 各不超过 50 字。
+- 字符串内禁止出现未转义的双引号与换行；需要引用时用中文书名号「」。
+- dimensions 必须是恰好 10 个元素的数组，每个元素只有
+  name / score / finding / why_it_works / reusable 五个键。
+输出越短越安全，禁止复述输入里的长文案。
 """
 
 
@@ -349,19 +357,49 @@ def deep_analyze(item, comments):
         "comment_sample_limit": 40,
         "no_transcript": True, "no_video_frames": True, "no_author_works": True,
     }
+    # 首次输入：评论样本 40 条但只留文字与点赞（情绪占比、时间跨度等统计
+    # 已在 facts 里算好），文案截到 1500 字。控制 prompt 体积，让十维输出
+    # 留在 max_tokens 之内 —— 真实视频的文案+话题+48 条评论很容易把输出撑爆。
     payload = {
         "真实数据": facts,
-        "视频文案": str(item.get("desc") or "")[:3000],
-        "评论样本": [{"text": c.get("text"), "likes": c.get("digg_count"),
-                     "replies": c.get("replies"), "date": c.get("date")}
+        "视频文案": str(item.get("desc") or "")[:1500],
+        "评论样本": [{"text": str(c.get("text") or "")[:80],
+                     "likes": c.get("digg_count")}
                     for c in (comments or [])[:40]],
-        "说明": "以上是全部可用数据。没有逐字稿、没有关键帧、没有播放量、没有博主作品；"
+        "说明": "以上是全部可用数据，评论情绪占比与时间跨度已在『真实数据』中算好，"
+               "评论样本仅作佐证。没有逐字稿、关键帧、播放量、博主作品；"
                "禁止生成这些指标，也不要把视频文案当成口播原话。",
     }
-    ai = llm.chat_json([
-        {"role": "system", "content": DEEP_SYSTEM},
-        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-    ], temperature=0.3, max_tokens=4000)
+
+    def _call(pl):
+        return llm.chat_json([
+            {"role": "system", "content": DEEP_SYSTEM},
+            {"role": "user", "content": json.dumps(pl, ensure_ascii=False)},
+        ], temperature=0.3, max_tokens=4000)
+
+    def _complete(ai):
+        """解析成功不等于内容完整：被截断后补齐的 JSON 可能只有 8 维、
+        或末尾几个章节洞察缺失，这种也要求重试，避免报告里出现占位维度。"""
+        if not isinstance(ai, dict):
+            return False
+        got_dims = len([d for d in (ai.get("dimensions") or []) if isinstance(d, dict)])
+        got_ins = sum(1 for k in ("engagement_insight", "duration_insight",
+                                  "title_insight", "hook_insight", "comment_insight")
+                      if str(ai.get(k) or "").strip())
+        return got_dims >= 10 and got_ins >= 5
+
+    try:
+        ai = _call(payload)
+        if not _complete(ai):
+            raise RuntimeError("十维/章节输出不完整，重试一次")
+    except Exception:
+        # 首次多半是十维 JSON 被 max_tokens 截断。第二次把输入压到最小再给
+        # 一次机会；facts（真实数字）保持不变，只是少喂样本，归因依据不变。
+        # 仍失败才让 harvest.py 回落规则引擎，原始输出已落盘可查。
+        slim = dict(payload)
+        slim["视频文案"] = str(item.get("desc") or "")[:600]
+        slim["评论样本"] = payload["评论样本"][:10]
+        ai = _call(slim)
     if not isinstance(ai, dict):
         raise RuntimeError("AI 返回的不是 JSON 对象")
 
