@@ -177,6 +177,31 @@ sudo rm -f /etc/nginx/sites-enabled/douyin-studio
 - **轻量档（当前默认）**：不下载视频，用 `desc` + 公开评论构造可分析文本，直接产出结构化报告。
 - **完整档**：`harvest.use_asr` 预留开关，接自托管 dtk / FunASR 下载音轨并转写口播逐字稿后替换文本来源。
 - 采集链路有关键词展开、`aweme_id` 唯一索引去重、`search_cache` 缓存、`max_calls` 预算与额度耗尽自动降级，避免把 API 余额跑爆。TikHub 错误响应会做**密钥脱敏**后再写日志，页面只回传掩码。
+- 搜索翻页使用上一次响应带回的 `cursor` / `search_id` / `backtrace`，不用硬编码页码；时间范围 `0/1/7/180` 天映射到 TikHub 的 `publish_time=0/1/7/180`，选「不限」传 `0`。
+
+## 接入 TikHub（首次拿真实数据）
+
+前置条件：注册 [TikHub](https://tikhub.io) → **验证邮箱**（未验证会 403）→ 充值或确认该端点有免费额度（余额不足会 402）→ 在用户中心创建 API Token。Token 只放请求头 `Authorization: Bearer <token>`。
+
+1. 打开网站右上角「设置」→「数据源 · 批量采集报告」：
+   - 默认数据源改选 `TikHub（真实抖音数据）`
+   - Base URL 保持 `https://api.tikhub.io`（官方主域名，不要用 `api.tikhub.dev`）
+   - 填入 API Key，点「保存设置」
+2. 点「**测试数据源连接**」。这一步会先保存设置，再发 **1 次**真实搜索请求，返回条数、样例标题和点赞数。它读的是已落盘的配置，所以必须先保存。
+3. 第 2 步「看分析」里先小额试跑：要几份报告填 `5`、时间范围选近半年、数据源选 TikHub、点「一键采集并分析」。任务面板能看到每一步日志和调用次数。确认报告列表里 `来源` 显示 `TikHub` 再放大批量。
+
+**计费口径**：每页搜索 1 次调用，每条视频取评论再 1 次调用。一次任务大致是「关键词数 × 每关键词页数 + 入库报告数 」，`max_calls` 是硬上限；评论取不到只影响报告里的「评论区高频提问」，不中断主流程。
+
+**错误码对照**（测试按钮和任务日志里都能看到，均已脱敏）：
+
+| 现象 | 原因 | 处理 |
+| --- | --- | --- |
+| `AuthFailed` / HTTP 401、403 | Token 无效、邮箱未验证、账户被禁用 | 检查 Token 与邮箱验证状态 |
+| `QuotaExceeded` / HTTP 402 | 余额不足，或该端点不接受免费额度 | 充值 |
+| `RateLimited` / HTTP 429 | 请求过快 | 降低 `pages_per_keyword`，稍后重试 |
+| `ProviderUnavailable` | 上游抓取失败 / 超时 | 可重试；失败会自动降级到演示数据 |
+
+> 降级后报告来源会带 `fallback` 标记，**不要把演示数据当成真实采集结果**。测试按钮和 `GET /api/providers` 都能确认当前生效的数据源。
 
 ## API 速查
 
@@ -195,6 +220,7 @@ sudo rm -f /etc/nginx/sites-enabled/douyin-studio
 | GET | `/api/reports`、`/api/reports/<id>` | 报告列表 / 详情 |
 | POST | `/api/reports/manual` | 手动录入报告 |
 | GET | `/api/providers` | 可用数据源 |
+| POST | `/api/providers/test` | 数据源自检（1 次真实搜索调用，读已保存的配置） |
 | POST | `/api/harvest/start` | 启动批量采集 |
 | GET | `/api/harvest`、`/api/harvest/<id>` | 任务列表 / 状态 |
 | POST | `/api/harvest/<id>/stop` | 停止任务 |

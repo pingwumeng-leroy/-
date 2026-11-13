@@ -301,6 +301,36 @@ def api_providers():
     return ok(providers.list_providers())
 
 
+@app.route("/api/providers/test", methods=["POST"])
+def api_provider_test():
+    """数据源自检：只发 1 次搜索请求，用来区分 Key / 余额 / 端点问题。
+
+    读的是已落盘的设置，所以前端要先「保存设置」再来测。
+    异常信息已在 providers 层脱敏，不含 Token。
+    """
+    d = request.get_json(force=True, silent=True) or {}
+    name = (d.get("provider") or "").strip() or None
+    kw = (d.get("keyword") or "成都注册公司").strip()
+    p = providers.get_provider(name)
+    if p.name == "mock":
+        return ok({"ok": True, "provider": "mock", "items": 0, "cost_calls": 0,
+                   "message": "演示数据源，不联网、不产生费用"})
+    try:
+        res = p.search(kw, cursor=0, sort_by="likes", publish_days=180, page_size=5)
+    except providers.ProviderError as exc:
+        # str(exc) 只含 HTTP 状态码和有限长度的中英文消息，不含 Authorization
+        return ok({"ok": False, "provider": p.name, "kind": type(exc).__name__,
+                   "error": str(exc)[:200], "cost_calls": 0})
+    sample = [{"title": x["title"][:40], "likes": x["digg_count"]}
+              for x in res.get("items", [])[:3]]
+    return ok({"ok": True, "provider": p.name, "keyword": kw,
+               "items": len(res.get("items", [])),
+               "cost_calls": res.get("cost_calls", 1),
+               "has_more": bool(res.get("has_more")),
+               "sample": sample,
+               "message": "连接正常" if res.get("items") else "连接正常，但该关键词没有返回视频"})
+
+
 @app.route("/api/harvest/start", methods=["POST"])
 def api_harvest_start():
     d = request.get_json(force=True, silent=True) or {}

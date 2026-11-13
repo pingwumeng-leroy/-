@@ -465,8 +465,10 @@ async function loadSettings() {
 }
 async function saveSettings() {
   const authOn = $('setAuthEnabled').value === 'true';
-  if (authOn && !$('setAuthPwd').value && !STATE.authHasPwd)
-    return toast('启用访问密码必须先填一个密码');
+  if (authOn && !$('setAuthPwd').value && !STATE.authHasPwd) {
+    toast('启用访问密码必须先填一个密码');
+    return false;
+  }
   const data = {
     llm:{enabled:$('setLlmEnabled').value==='true', base_url:$('setLlmUrl').value.trim(),
          model:$('setLlmModel').value.trim()},
@@ -494,8 +496,35 @@ async function saveSettings() {
     b.className = 'badge ' + (s.llm_enabled?'on':'off');
     STATE.llm = s.llm_enabled;
     STATE.authHasPwd = authOn;
-  } catch (e) { $('setMsg').textContent = '保存失败：'+e.message; }
+    return true;
+  } catch (e) { $('setMsg').textContent = '保存失败：'+e.message; return false; }
 }
+
+async function testProvider() {
+  const btn = $('btnTestProvider'), box = $('providerTestMsg');
+  btn.disabled = true;
+  box.textContent = '正在保存设置并发起 1 次测试调用…';
+  try {
+    if (!await saveSettings()) { box.textContent = '设置保存失败，无法测试'; return; }
+    const r = await api('/api/providers/test', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({provider: $('setProvider').value})
+    });
+    if (!r.ok) {
+      box.textContent = '✗ 连接失败：' + (r.error || '未知错误') +
+        (r.kind ? '（' + r.kind + '）' : '');
+      return;
+    }
+    const sample = (r.sample || []).map(s => `${s.title}（${s.likes} 赞）`).join('；');
+    box.textContent = '✓ ' + (r.message || '连接正常') +
+      '｜返回 ' + r.items + ' 条｜消耗 ' + r.cost_calls + ' 次调用' +
+      (sample ? '\n样例：' + sample : '');
+    await loadProviders();
+  } catch (e) {
+    box.textContent = '✗ 测试失败：' + e.message;
+  } finally { btn.disabled = false; }
+}
+
 async function saveTemplates() {
   document.querySelectorAll('#tplEditor input').forEach(inp=>{
     const i = +inp.dataset.ti, k = inp.dataset.k;
