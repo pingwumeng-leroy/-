@@ -130,6 +130,22 @@ def analyze_transcript(tr, duration):
     return r
 
 
+# 本地兜底替换表：模型完全不可用（如内容过滤拦截）时也能纠正的高置信度错别字。
+# 只收「几乎不可能是本意」的谐音错误，宁可少改也不误改。
+_LOCAL_FIXES = {
+    "营业值要": "营业执照", "营业执照执照": "营业执照",
+    "增值睡": "增值税", "增直税": "增值税",
+    "企业所的税": "企业所得税", "个人所的税": "个人所得税",
+    "会算清缴": "汇算清缴", "汇算清交": "汇算清缴",
+    "纳税神报": "纳税申报", "纳税申抱": "纳税申报",
+    "代理记帐": "代理记账", "代理寄账": "代理记账",
+    "工商组册": "工商注册", "工商住册": "工商注册",
+    "对公帐户": "对公账户", "银行开护": "银行开户",
+    "注册资本金实缴": "注册资本实缴",
+    "个体工商户主": "个体工商户",
+    "税务登记证": "税务登记", "经营范围变更": "经营范围变更",
+}
+
 # ASR 高频误识别的财税/工商术语对照，作为纠错提示词的一部分
 _DOMAIN_GLOSSARY = (
     "营业执照、营业值要、个体工商户、个体户、代理记账、报税、纳税申报、汇算清缴、"
@@ -175,59 +191,103 @@ def _apply_replacements(text, pairs):
 
 
 def correct_transcript(tr):
-    """用 DeepSeek 纠正逐字稿的 ASR 错别字，返回 (tr, 修正处数, 说明)。
+    """纠正逐字稿 ASR 错别字，返回 (tr, 修正处数, 说明)。
 
-    让模型只输出「错词→正确词」对照表，而不是重写整段文本：
-    1) 输出短，不会因为 max_tokens 被截断；
-    2) 不会改动语序、不增删内容（让模型重写整段时很容易顺手改写）；
-    3) 替换表可复现、可审计，日志里能直接打出来。
-    模型不可用 / 输出破损时原样返回并在说明里写原因，不阻断采集。
+    三层策略，层层兜底：
+    1) 本地术语表：高置信度谐音错误直接替换，模型挂了也能纠一部分；
+    2) DeepSeek 对照表：分块送校对（每块最多 60 段），模型只输出
+       「错词→正确词」，不重写原文 —— 输出短、可审计、不会被截断；
+    3) 单块失败不阻断：逐块记录原因，最后汇总到 correct_note。
     """
     if not tr or not tr.get("full") or not (tr.get("segments") or []):
         return tr, 0, "无逐字稿，跳过"
-    from . import llm  # 局部导入，避免顶层循环
-    if not llm.available():
-        return tr, 0, "LLM 未启用或 Key 为空"
 
     segs = tr["segments"]
-    texts = [str(s.get("text") or "") for s in segs]
-    body = "\n".join("%d|%s" % (i + 1, t) for i, t in enumerate(texts))[:6000]
-    try:
-        data = llm.chat_json([
-            {"role": "system", "content": _CORRECT_SYSTEM},
-            {"role": "user", "content": body + (
-                "\n\n只输出错别字对照表，不要重写原文。JSON 格式："
-                '{"fixes": [{"wrong": "原文里逐字出现的错误片段", "right": "正确写法"}]}'
-                "\n要求：wrong 必须是原文中逐字出现的片段；没有错别字就输出 "
-                '{"fixes": []}。最多 30 条。')},
-        ], temperature=0.0, max_tokens=1500)
-    except Exception as exc:
-        return tr, 0, "调用失败：%s" % str(exc)[:80]
+    notes, all_pairs = [], []
 
-    fixes = data.get("fixes") if isinstance(data, dict) else None
-    if not isinstance(fixes, list):
-        return tr, 0, "模型未按 fixes 格式返回：%s" % str(data)[:60]
-    pairs = []
-    for x in fixes:
-        if isinstance(x, dict):
-            pairs.append((x.get("wrong"), x.get("right")))
-    if not pairs:
-        return tr, 0, "模型判定无错别字"
-
-    hit_total = 0
+    # --- 第 1 层：本地兜底表（始终执行） ---
+    local_hits = 0
     for s in segs:
-        new, hit = _apply_replacements(str(s.get("text") or ""), pairs)
+        text = str(s.get("text") or "")
+        hit_pairs = [(a, b) for a, b in _LOCAL_FIXES.items() if a in text]
+        if not hit_pairs:
+            continue
+        new, hit = _apply_replacements(text, hit_pairs)
         if hit:
             s["text"] = new
-            hit_total += hit
-    if not hit_total:
-        sample = "、".join(str(a) for a, _b in pairs[:3])
-        return tr, 0, "给了 %d 条对照但原文未命中（%s）" % (len(pairs), sample)
+            local_hits += hit
+            all_pairs.extend((str(a), str(b)) for a, b in hit_pairs)
+    if local_hits:
+        notes.append("本地术语表替换 %d 处" % local_hits)
+        tr["full"] = "".join(str(s.get("text") or "") for s in segs)
 
-    tr["full"] = "".join(str(s.get("text") or "") for s in segs)
-    tr["corrections"] = [{"wrong": str(a), "right": str(b)} for a, b in pairs[:30]]
-    sample = "、".join("%s→%s" % (a, b) for a, b in pairs[:3])
-    return tr, hit_total, "替换 %d 处（%s）" % (hit_total, sample)
+    # --- 第 2 层：DeepSeek 分块校对 ---
+    from . import llm  # 局部导入，避免顶层循环
+    if not llm.available():
+        notes.append("LLM 未启用，仅本地术语表兜底")
+        tr["corrections"] = [{"wrong": a, "right": b} for a, b in all_pairs[:30]]
+        tr["correct_note"] = "；".join(notes)
+        return tr, local_hits, "；".join(notes)
+
+    CHUNK = 60
+    llm_hits = 0
+    fail_chunks = 0
+    for ci in range(0, len(segs), CHUNK):
+        chunk = segs[ci:ci + CHUNK]
+        body = "\n".join("%d|%s" % (i + 1, str(s.get("text") or ""))
+                         for i, s in enumerate(chunk))[:6000]
+        try:
+            data = llm.chat_json([
+                {"role": "system", "content": _CORRECT_SYSTEM},
+                {"role": "user", "content": body + (
+                    "\n\n只输出错别字对照表，不要重写原文。JSON 格式："
+                    '{"fixes": [{"wrong": "原文里逐字出现的错误片段", "right": "正确写法"}]}'
+                    "\n要求：wrong 必须是原文中逐字出现的片段；没有错别字就输出 "
+                    '{"fixes": []}。最多 30 条。')},
+            ], temperature=0.0, max_tokens=1500)
+        except Exception as exc:
+            fail_chunks += 1
+            notes.append("第%d块调用失败：%s" % (ci // CHUNK + 1, str(exc)[:60]))
+            continue
+        fixes = data.get("fixes") if isinstance(data, dict) else None
+        if not isinstance(fixes, list):
+            fail_chunks += 1
+            notes.append("第%d块格式不符" % (ci // CHUNK + 1))
+            continue
+        pairs = [(x.get("wrong"), x.get("right")) for x in fixes
+                 if isinstance(x, dict)]
+        pairs = [(a, b) for a, b in pairs if str(a or "").strip() and str(b or "").strip()]
+        if not pairs:
+            continue
+        chunk_hits = 0
+        for s in chunk:
+            new, hit = _apply_replacements(str(s.get("text") or ""), pairs)
+            if hit:
+                s["text"] = new
+                chunk_hits += hit
+        if chunk_hits:
+            llm_hits += chunk_hits
+            all_pairs.extend([(str(a), str(b)) for a, b in pairs])
+            tr["full"] = "".join(str(s.get("text") or "") for s in segs)
+        else:
+            notes.append("第%d块给了 %d 条对照但未命中"
+                         % (ci // CHUNK + 1, len(pairs)))
+
+    total = local_hits + llm_hits
+    if total:
+        # 去重后保留替换明细，前端如实展示
+        seen, uniq = set(), []
+        for a, b in all_pairs:
+            if (a, b) not in seen:
+                seen.add((a, b))
+                uniq.append({"wrong": str(a), "right": str(b)})
+        tr["corrections"] = uniq[:30]
+        sample = "、".join("%s→%s" % (c["wrong"], c["right"]) for c in uniq[:3])
+        notes.append("模型替换 %d 处（%s）" % (llm_hits, sample) if llm_hits else "")
+    elif not fail_chunks:
+        notes.append("模型判定无错别字")
+    tr["correct_note"] = "；".join(n for n in notes if n)
+    return tr, total, tr["correct_note"]
 
 
 def _wav_to_float32(path):

@@ -8,6 +8,7 @@ import json
 import os
 import re
 import mimetypes
+import time
 
 import requests
 
@@ -46,7 +47,16 @@ def chat(messages, temperature=0.7, max_tokens=4000, json_mode=False):
                           timeout=s.get("timeout", 90))
         r.raise_for_status()
         data = r.json()
-        return data["choices"][0]["message"]["content"]
+        msg = (data.get("choices") or [{}])[0].get("message") or {}
+        content = msg.get("content") or ""
+        if not content.strip():
+            # 空回复：多半是内容安全过滤拦截（finish_reason=length/content_filter
+            # 或 provider 直接给空串）。带上 finish_reason 方便定位。
+            finish = (data.get("choices") or [{}])[0].get("finish_reason")
+            raise LLMUnavailable("模型返回空内容（finish_reason=%s）" % finish)
+        return content
+    except LLMUnavailable:
+        raise
     except Exception as exc:
         raise LLMUnavailable(f"LLM 调用失败：{exc}")
 
@@ -109,25 +119,29 @@ def _dump_llm_error(raw, exc, txt):
 
 
 def chat_json(messages, temperature=0.4, max_tokens=4000):
-    """要求返回 JSON 对象；对模型常见的四类破损做容错解析。
+    """要求返回 JSON 对象；对模型常见的几类破损做容错解析。
 
     1) markdown 代码块 / 前后解释文字；2) 尾随逗号、字符串内裸换行；
     3) 被 max_tokens 截断导致闭合符缺失（十维长 JSON 最常见）；
-    4) json_object 模式偶发返回空串（DeepSeek 实测）——此时去掉
-       response_format 限制再试一次，靠提示词里的「只输出 JSON」兜底。
-    两次都失败时抛 LLMUnavailable，并在 data/llm_json_error.txt 留下原文。
+    4) 偶发空回复（内容过滤或瞬时故障）—— json_mode 与非 json_mode
+       交替最多试 3 次，间隔 2 秒。
+    全部失败抛 LLMUnavailable，最后一次原文落盘 data/llm_json_error.txt。
     """
     last_exc = None
-    for json_mode in (True, False):
+    for attempt, json_mode in enumerate((True, False, True)):
         try:
             raw = chat(messages, temperature=temperature, json_mode=json_mode,
                        max_tokens=max_tokens)
         except LLMUnavailable as exc:
             last_exc = exc
+            if attempt < 2:
+                time.sleep(2)
             continue
         txt = _strip_json(raw)
         if not txt:
             last_exc = LLMUnavailable("模型返回空内容（json_mode=%s）" % json_mode)
+            if attempt < 2:
+                time.sleep(2)
             continue
         try:
             # strict=False 允许字符串里出现裸换行/控制字符
