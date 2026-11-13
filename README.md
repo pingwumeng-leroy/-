@@ -54,7 +54,8 @@ cp config/settings.example.json config/settings.json       # 不复制也行，�
 # 属主=你、组=www-data、组可写，服务与手动运行 app.py 两种情况都能写
 sudo mkdir -p data
 sudo chown -R "$(id -un):www-data" data config
-sudo chmod -R g+w data config
+sudo chmod -R g+rwX data config     # 大写 X：只给目录加执行位，目录没有 x 照样进不去
+sudo chmod o+rx /opt/douyin-studio  # 服务用户至少要能进入项目根目录
 
 sudo cp deploy/douyin-studio.service /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -72,6 +73,22 @@ sudo systemctl enable --now nginx    # 首次部署必须 start；reload 只对�
 ```
 
 `nginx.conf.example` 已配置 `client_max_body_size 1024m`（口播视频上传）与 `proxy_read_timeout 600s`（剪辑任务耗时）。
+
+### 网站打开只显示一段 JSON 怎么处理
+
+若页面返回 `{"error":"[Errno 13] Permission denied: '.../data'","ok":false}`，不是服务崩了，是 **`data/` 或项目根目录对服务用户不可写/不可进入**。`get_settings()` 每个请求都会检查这些目录，所以权限一坏，连首页都会被全局异常处理转成 JSON。常见于部署后以 `sudo` 跑过 `mkdir` / `cp` / `chown`，把属主改回了 root。
+
+```bash
+SVC=$(systemctl show -p User --value douyin-studio); SVC=${SVC:-www-data}
+stat -c '%U:%G %a %n' /opt/douyin-studio /opt/douyin-studio/data /opt/douyin-studio/config
+sudo chgrp -R "$SVC" /opt/douyin-studio/data /opt/douyin-studio/config
+sudo chmod -R g+rwX /opt/douyin-studio/data /opt/douyin-studio/config
+sudo chmod o+rx /opt/douyin-studio
+sudo systemctl restart douyin-studio
+curl -s -o /dev/null -w '后端 %{http_code}\n' http://127.0.0.1:8080/healthz   # 应为 200
+```
+
+启动日志里 `[BOOT] 目录可写： data=True config=True` 也能直接确认。`journalctl -u douyin-studio -n 30` 可看 restart 是否成功。
 
 **证书前置**：示例的 443 段引用 `/etc/letsencrypt/live/YOUR_DOMAIN/fullchain.pem`，没签证书时 `nginx -t` 会直接失败。两条路：
 

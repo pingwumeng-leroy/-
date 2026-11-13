@@ -505,6 +505,8 @@ def bootstrap():
     config._ensure()
     a = config.get_settings().get("auth", {})
     print("[BOOT] 数据库就绪：", config.DB_PATH)
+    print("[BOOT] 目录可写： data=%s config=%s" % (
+        os.access(config.DATA, os.W_OK), os.access(config.CONFIG_DIR, os.W_OK)))
     print("[BOOT] LLM 已启用：", llm.available())
     print("[BOOT] 剪辑模板：", [t["name"] for t in config.get_templates()])
     print("[BOOT] 访问密码：", "已开启" if (a.get("enabled") and a.get("password"))
