@@ -367,14 +367,35 @@ def api_harvest_start():
 
 @app.route("/api/harvest")
 def api_harvest_list():
-    return ok(db.list_harvest_jobs())
+    # 任务历史会一直累计，默认上限放宽到 1000；前端自己控制显示几条
+    try:
+        lim = int(request.args.get("limit") or 1000)
+    except (TypeError, ValueError):
+        lim = 1000
+    return ok(db.list_harvest_jobs(limit=max(1, min(lim, 5000))))
 
 
-@app.route("/api/harvest/<int:jid>")
+@app.route("/api/harvest/clear", methods=["POST"])
+def api_harvest_clear():
+    """一键清空采集任务历史（只删任务记录，保留已入库报告）。"""
+    d = request.get_json(force=True, silent=True) or {}
+    if d.get("confirm") != "CLEAR":
+        return err("缺少确认参数")
+    deleted, kept = db.clear_harvest_jobs()
+    return ok({"deleted": deleted, "kept": kept})
+
+
+@app.route("/api/harvest/<int:jid>", methods=["GET", "DELETE"])
 def api_harvest_job(jid):
     j = db.get_harvest_job(jid)
     if not j:
         return err("任务不存在", 404)
+    if request.method == "DELETE":
+        # 运行中的任务不删：否则后台线程会继续入库报告，列表却已经干净了
+        if j.get("status") in ("queued", "running"):
+            return err("任务正在运行，请先停止任务再删除")
+        db.delete_harvest_job(jid)
+        return ok({"deleted": jid})
     return ok(j)
 
 

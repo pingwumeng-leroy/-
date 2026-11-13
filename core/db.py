@@ -345,6 +345,23 @@ def list_harvest_jobs(limit=50):
     return q("SELECT * FROM harvest_jobs ORDER BY id DESC LIMIT ?", (limit,))
 
 
+def delete_harvest_job(jid):
+    """删除单条采集任务记录；reports 表里已入库的分析报告不受影响。"""
+    execute("DELETE FROM harvest_jobs WHERE id=?", (jid,))
+
+
+def clear_harvest_jobs():
+    """清空已结束的采集任务记录，运行中的保留。返回 (删除数, 保留数)。
+
+    不碰 reports / scripts / videos，也不重置自增序号：清空历史只影响第 2 步的
+    任务列表，经验库里的报告全部保留。
+    """
+    total = (one("SELECT COUNT(*) n FROM harvest_jobs") or {}).get("n", 0)
+    execute("DELETE FROM harvest_jobs WHERE status NOT IN ('queued','running')")
+    kept = (one("SELECT COUNT(*) n FROM harvest_jobs") or {}).get("n", 0)
+    return total - kept, kept
+
+
 def add_harvest_report(report, item, job_id, source_provider, engine="rule"):
     """先按原有结构入库，再补写来源字段；保证 generate.py 无需任何改动。"""
     rid = add_report(report, video_id=None, engine=engine)

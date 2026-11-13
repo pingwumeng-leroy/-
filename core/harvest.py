@@ -193,7 +193,8 @@ def run_harvest(jid):
 
         imported, errors = 0, 0
         for i, item in enumerate(target):
-            if db.get_harvest_job(jid).get("status") == "stopped":
+            # 任务记录可能已被「清空历史」删掉，用空字典兜底避免 None.get()
+            if (db.get_harvest_job(jid) or {}).get("status") == "stopped":
                 _log(jid, 100, lines, "任务被手动停止，已入库报告保留")
                 break
             try:
