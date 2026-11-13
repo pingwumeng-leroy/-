@@ -130,6 +130,67 @@ def analyze_transcript(tr, duration):
     return r
 
 
+# ASR 高频误识别的财税/工商术语对照，作为纠错提示词的一部分
+_DOMAIN_GLOSSARY = (
+    "营业执照、营业值要、个体工商户、个体户、代理记账、报税、纳税申报、汇算清缴、"
+    "增值税、企业所得税、个人所得税、附加税、税务筹划、税收洼地、核定征收、"
+    "工商注册、工商变更、注销、吊销、注册资本、实缴、认缴、验资、年报、"
+    "对公账户、银行开户、基本户、开户许可证、公章、财务章、法人、股东、监事、"
+    "股权、代持、经营范围、地址挂靠、异常名录、失信、限高、社保、公积金、"
+    "发票、专票、普票、开票、作废、红冲、稽查、滞纳金、罚款"
+)
+
+_CORRECT_SYSTEM = (
+    "你是中文语音识别（ASR）校对员，专注财税、工商、企业服务领域。"
+    "输入是 Whisper 转写的口播稿，存在同音字/谐音字错误"
+    "（例如「营业值要」应为「营业执照」）。"
+    "请结合上下文和以下领域术语表纠正错别字：" + _DOMAIN_GLOSSARY + "。"
+    "硬性规则："
+    "1) 只改错别字和明显转写错误，不改动语序、不增删内容、不改口语风格；"
+    "2) 术语表的词优先于普通猜测；拿不准的原样保留，不要编造；"
+    "3) 数组必须逐条对应，条数、顺序都不能变。"
+)
+
+
+def correct_transcript(tr):
+    """用 DeepSeek 纠正逐字稿的 ASR 错别字，返回 (tr, 修正段数)。
+
+    按「段」纠正而不是纠正拼接全文：第四章的前 3 秒 / 前 15 秒原话、
+    信息密度曲线都来自 segments 的逐段文本，整段替换才能让全文和
+    时间戳指标保持一致。模型不可用或返回条数不符时原样返回，不阻断采集。
+    """
+    if not tr or not tr.get("full") or not (tr.get("segments") or []):
+        return tr, 0
+    from . import llm  # 局部导入，避免顶层循环
+    if not llm.available():
+        return tr, 0
+    segs = tr["segments"]
+    texts = [str(s.get("text") or "") for s in segs[:80]]
+    try:
+        data = llm.chat_json([
+            {"role": "system", "content": _CORRECT_SYSTEM},
+            {"role": "user", "content": "待校对的逐字稿数组：\n" +
+             "\n".join("%d|%s" % (i + 1, t) for i, t in enumerate(texts)) +
+             "\n\n输出 JSON：{\"segments\": [\"纠正后的第1条\", ...]}，"
+             "条数必须与输入一致。"},
+        ], temperature=0.1, max_tokens=4000)
+        fixed = data.get("segments") if isinstance(data, dict) else None
+        if not isinstance(fixed, list) or len(fixed) != len(texts):
+            return tr, 0
+        changed = 0
+        for s, new in zip(segs[:80], fixed):
+            new = str(new or "").strip()
+            old = str(s.get("text") or "").strip()
+            if new and new != old:
+                s["text"] = new
+                changed += 1
+        if changed:
+            tr["full"] = "".join(str(s.get("text") or "") for s in segs)
+        return tr, changed
+    except Exception:
+        return tr, 0
+
+
 def _wav_to_float32(path):
     """把 ffmpeg 抽出的 wav 读成 float32 mono 数组，直接喂给 model.transcribe()。
 

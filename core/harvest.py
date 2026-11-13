@@ -228,6 +228,13 @@ def run_harvest(jid):
                             if tr and tr.get("full"):
                                 _log(jid, 50, lines, "逐字稿 %d 字 / %d 段（本地转写）" %
                                      (len(tr["full"]), len(tr["segments"])))
+                                # DeepSeek 上下文纠错：只改 ASR 错别字，不改时间戳结构
+                                tr, nfix = transcript.correct_transcript(tr)
+                                if nfix:
+                                    _log(jid, 50, lines,
+                                         "逐字稿纠错完成：修正 %d 段（DeepSeek）" % nfix)
+                                else:
+                                    _log(jid, 50, lines, "逐字稿纠错：未改动或模型不可用")
                             else:
                                 tr = None
                                 _log(jid, 50, lines, "逐字稿为空，回落轻量档")

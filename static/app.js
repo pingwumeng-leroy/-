@@ -250,7 +250,8 @@ function renderDeepReport(r, R) {
         </div>
         <div class="muted" style="margin:10px 0 4px">信息密度曲线（每 10% 时长的字数）</div>
         ${densityBars(trF.density_curve)}
-        <p class="muted" style="margin:6px 0 0">来源 ${esc(trF.source || '本地转写')} · 共 ${num(trF.segments_count)} 段带时间戳字幕</p>
+        ${(trF.full_text || '').trim() ? `<details class="trfull"><summary>完整逐字稿（${num(trF.chars)} 字）</summary><pre>${esc(trF.full_text)}</pre></details>` : ''}
+        <p class="muted" style="margin:6px 0 0">来源 ${esc(trF.source || '本地转写')} · 共 ${num(trF.segments_count)} 段带时间戳字幕 · 错别字已经 DeepSeek 校对</p>
       </div>`
     : `<div class="warnbox">⚠ 轻量档未下载视频、未做语音转写，<b>没有逐字稿</b>。本节仅为基于标题 / 视频文案 / 评论样本的钩子类型推断，不含前 3 秒原话、语速与信息密度曲线。</div>`;
 

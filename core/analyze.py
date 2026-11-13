@@ -421,6 +421,8 @@ def deep_analyze(item, comments, tr=None):
     if has_tr:
         tf["has_transcript"] = True
         tf["source"] = "faster-whisper 本地转写"
+        # 完整逐字稿全文入库（DeepSeek 纠错后），第四章前端展示用
+        tf["full_text"] = str(tr.get("full") or "")[:8000]
         facts["transcript"] = tf
 
     # 首次输入：评论样本 40 条但只留文字与点赞（统计已在 facts 里算好），
