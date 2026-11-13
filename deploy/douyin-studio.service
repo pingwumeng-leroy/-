@@ -8,6 +8,7 @@ After=network.target
 
 [Service]
 Type=simple
+# 需保证 data/ 与 config/ 对该用户可写（设置页、上传、成片都要写盘）
 User=www-data
 WorkingDirectory=/opt/douyin-studio
 Environment=PORT=8080

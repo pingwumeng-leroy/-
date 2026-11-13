@@ -48,9 +48,13 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 cp config/settings.example.json config/settings.json       # 不复制也行，首启自动生成
 
-# systemd 以 www-data 运行，只有 data/ 需要写权限（SQLite / 上传 / 成片）
+# systemd 以 www-data 运行，data/ 和 config/ 都必须可写：
+#   data/   —— SQLite、上传视频、成片
+#   config/ —— 设置页保存 settings.json 与剪辑模板；漏掉会报 Permission denied
+# 属主=你、组=www-data、组可写，服务与手动运行 app.py 两种情况都能写
 sudo mkdir -p data
-sudo chown -R www-data:www-data data
+sudo chown -R "$(id -un):www-data" data config
+sudo chmod -R g+w data config
 
 sudo cp deploy/douyin-studio.service /etc/systemd/system/
 sudo systemctl daemon-reload
