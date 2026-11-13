@@ -244,7 +244,10 @@ def correct_transcript(tr):
                     '{"fixes": [{"wrong": "原文里逐字出现的错误片段", "right": "正确写法"}]}'
                     "\n要求：wrong 必须是原文中逐字出现的片段；没有错别字就输出 "
                     '{"fixes": []}。最多 30 条。')},
-            ], temperature=0.0, max_tokens=1500)
+            # deepseek-flash 等推理型模型会先输出思考过程，max_tokens 太小
+            # 会被推理烧光、正文为空（finish_reason=length），与十维分析
+            # 一致给 4000，保证对照表有足够输出空间
+            ], temperature=0.0, max_tokens=4000)
         except Exception as exc:
             fail_chunks += 1
             notes.append("第%d块调用失败：%s" % (ci // CHUNK + 1, str(exc)[:60]))
