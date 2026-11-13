@@ -130,12 +130,43 @@ def analyze_transcript(tr, duration):
     return r
 
 
+def _wav_to_float32(path):
+    """把 ffmpeg 抽出的 wav 读成 float32 mono 数组，直接喂给 model.transcribe()。
+
+    不这么做的话 faster-whisper 会走 PyAV 的 decode_audio() 解码文件路径，
+    而 faster-whisper 1.2.x 调用的 av.open(..., metadata_errors=...) 参数在
+    PyAV 19 里已被移除，一进 transcribe() 就报
+    open() got an unexpected keyword argument 'metadata_errors'。
+    传 ndarray 完全绕开 PyAV，与 av 版本解耦，模型加载和下载不受影响。
+    """
+    import wave
+    import numpy as np
+    with wave.open(path, "rb") as w:
+        rate, ch, sw = w.getframerate(), w.getnchannels(), w.getsampwidth()
+        raw = w.readframes(w.getnframes())
+    if rate != 16000:
+        raise RuntimeError("wav 采样率 %dHz ≠ 16000，ndarray 直喂会错位时间戳" % rate)
+    if sw == 2:
+        a = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    elif sw == 4:
+        a = np.frombuffer(raw, dtype=np.int32).astype(np.float32) / 2147483648.0
+    else:
+        raise RuntimeError("不支持的 WAV 位深 %d bit（期望 ffmpeg 产出的 16/32bit PCM）" % (sw * 8))
+    if ch > 1:
+        a = a.reshape(-1, ch).mean(axis=1)
+    if a.size == 0:
+        raise RuntimeError("音频为空：视频可能没有音轨，或 ffmpeg 抽取失败")
+    return a
+
+
 def transcribe_video(video_path, out_dir, model_size="small"):
     """本地 faster-whisper 转写，生成带时间戳 transcript.srt，返回路径。
 
     国内服务器常拉不到 HuggingFace，默认走 hf-mirror；模型缓存放在
     data/hf_cache（已 gitignore），避免 www-data 没有 home 写权限。
     两者都允许用外部环境变量覆盖。
+    音频用 ffmpeg 预先抽成 16kHz 单声道 wav 后读成数组直喂模型，
+    不把文件路径交给 transcribe()（规避 PyAV 19 的 metadata_errors 崩溃）。
     """
     os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
     os.environ.setdefault("HF_HOME", os.path.join(config.DATA, "hf_cache"))
@@ -152,12 +183,13 @@ def transcribe_video(video_path, out_dir, model_size="small"):
     srt = os.path.join(out_dir, "transcript.srt")
     ingest.extract_audio(video_path, wav)
     try:
+        audio = _wav_to_float32(wav)
         if model_size not in _MODEL_CACHE:
             _MODEL_CACHE[model_size] = WhisperModel(
                 model_size, device="auto", compute_type="int8")
         model = _MODEL_CACHE[model_size]
         segments, _info = model.transcribe(
-            wav, language="zh", vad_filter=True,
+            audio, language="zh", vad_filter=True,
             initial_prompt="以下是普通话的句子，使用简体中文。")
         with open(srt, "w", encoding="utf-8") as fh:
             for i, seg in enumerate(segments, 1):
