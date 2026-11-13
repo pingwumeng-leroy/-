@@ -179,6 +179,7 @@
 <section class="card" id="s4">
   <div class="cardhead">
     <div><h2><em>04</em> 拍口播 &amp; 上传</h2><p>照着定稿文案念一遍，用手机竖着拍，把原片传上来就行</p></div>
+    <button class="btn" onclick="skipShoot()">跳过拍摄，直接去剪辑 →</button>
   </div>
   <div class="two-col">
     <div class="panel">
@@ -203,24 +204,81 @@
 <!-- ============ 步骤 5 ============ -->
 <section class="card" id="s5">
   <div class="cardhead">
-    <div><h2><em>05</em> 自动剪辑出片</h2><p>模板自动加片头、字幕、水印、片尾，统一成抖音竖屏，直接下载发</p></div>
+    <div><h2><em>05</em> 自动剪辑出片</h2><p>三种出片：口播剪辑 / 无原片 TTS 成片 / MotionGit 模板（动效 100% 还原官网）</p></div>
     <span class="count" id="nJobs">0 个任务</span>
   </div>
+
+  <div class="modetabs">
+    <button class="modetab active" data-mode="talk" onclick="setRenderMode('talk')">口播剪辑</button>
+    <button class="modetab" data-mode="tts" onclick="setRenderMode('tts')">无原片·TTS成片</button>
+    <button class="modetab" data-mode="motion" onclick="setRenderMode('motion')">MotionGit 模板</button>
+  </div>
+
   <div class="two-col">
-    <div class="panel">
-      <h3>选择模板并开始</h3>
-      <label>剪辑模板</label>
-      <select id="tplSelect"></select>
-      <div id="tplDesc" class="tip"></div>
-      <div class="grid3">
-        <div><label>裁掉开头(秒)</label><input id="ovTrimHead" type="number" step="0.1" value="0"/></div>
-        <div><label>裁掉结尾(秒)</label><input id="ovTrimTail" type="number" step="0.1" value="0"/></div>
-        <div><label>语速</label><input id="ovSpeed" type="number" step="0.05" value="1"/></div>
+    <div class="panel" id="modePanel">
+      <!-- 口播剪辑 -->
+      <div class="modebody" id="modeTalk">
+        <h3>口播原片 + 模板剪辑</h3>
+        <div class="tip">口播原片：<b id="talkRefName">未上传（回第 4 步上传）</b></div>
+        <label>剪辑模板</label>
+        <select id="tplSelect"></select>
+        <div id="tplDesc" class="tip"></div>
+        <div class="grid3">
+          <div><label>裁掉开头(秒)</label><input id="ovTrimHead" type="number" step="0.1" value="0"/></div>
+          <div><label>裁掉结尾(秒)</label><input id="ovTrimTail" type="number" step="0.1" value="0"/></div>
+          <div><label>语速</label><input id="ovSpeed" type="number" step="0.05" value="1"/></div>
+        </div>
+        <p class="tip">改了上面数值会临时覆盖模板参数（不保存）。字幕按文案自动分句烧录。</p>
+        <button class="btn primary big" onclick="startRender()" id="btnRender">开始自动剪辑</button>
       </div>
-      <p class="tip">改了上面数值会临时覆盖模板参数（不保存）。字幕按文案自动分句烧录。</p>
-      <button class="btn primary big" onclick="startRender()" id="btnRender">开始自动剪辑</button>
+
+      <!-- 无原片 TTS 成片 -->
+      <div class="modebody hidden" id="modeTts">
+        <h3>无原片 · edge-tts 配音成片</h3>
+        <p class="tip">不需要任何视频。用微软免费 TTS 念出文案当配音，配卡片画面合成竖屏成片，零成本、零外部依赖。</p>
+        <label>配音音色</label>
+        <select id="ttsVoice">
+          <option value="xiaoxiao">晓晓（女声·自然，默认）</option>
+          <option value="yunxi">云希（男声·清爽）</option>
+          <option value="xiaoyi">晓伊（女声·温柔）</option>
+          <option value="yunyang">云扬（男声·播报感）</option>
+          <option value="xiaobei">晓贝（女声·活泼）</option>
+        </select>
+        <div class="grid2">
+          <div><label>强调色</label><input id="ttsAccent" value="#ff6a3d"/></div>
+          <div><label>背景色</label><input id="ttsBg" value="#0e1a24"/></div>
+        </div>
+        <button class="btn primary big" onclick="startRender()" id="btnRenderTts">开始生成（无需上传）</button>
+      </div>
+
+      <!-- MotionGit 模板 -->
+      <div class="modebody hidden" id="modeMotion">
+        <h3>MotionGit 模板（真对接）</h3>
+        <label>模板包（.motion）</label>
+        <select id="motionPkg" onchange="onMotionPkg()"></select>
+        <label class="filebtn">上传 .motion 工程包
+          <input type="file" id="fileMotion" accept=".motion" hidden/>
+        </label>
+        <div id="motionPkgMeta" class="tip">还没有模板包。把在 MotionGit 官网下载的 .motion 上传到这里即可真对接出片。</div>
+        <label>选用场景（原生单元）</label>
+        <div id="motionScenes" class="checks"><span class="muted">先选模板包</span></div>
+        <label>配音音色</label>
+        <select id="motionVoice">
+          <option value="">不配音（模板原声/静音）</option>
+          <option value="xiaoxiao" selected>晓晓（女声·自然）</option>
+          <option value="yunxi">云希（男声·清爽）</option>
+          <option value="xiaoyi">晓伊（女声·温柔）</option>
+          <option value="yunyang">云扬（男声·播报感）</option>
+          <option value="xiaobei">晓贝（女声·活泼）</option>
+        </select>
+        <button class="btn" onclick="previewMotion()">预览自动生成输入</button>
+        <pre id="motionPreview" class="codebox"></pre>
+        <button class="btn primary big" onclick="startRender()" id="btnRenderMotion">开始用模板出片</button>
+      </div>
+
       <div id="renderStatus" class="renderbox">等待任务</div>
     </div>
+
     <div class="panel">
       <h3>成片预览</h3>
       <div class="preview" id="previewBox"><span>剪辑完成后这里可以直接播放</span></div>
@@ -333,6 +391,26 @@
     <textarea id="seedBatch" rows="3" placeholder="成都企服老周|https://www.douyin.com/user/...||工商注销"></textarea>
     <button class="btn" onclick="importSeeds()">批量导入</button>
     <div id="seedList" class="tip">还没有种子账号</div>
+
+    <h3>MotionGit Creator API（配音 / 生图 / 素材，成片仍本机渲染）</h3>
+    <label>启用</label>
+    <select id="setMgEnabled"><option value="false">关闭</option><option value="true">启用</option></select>
+    <label>Base URL</label>
+    <input id="setMgUrl" placeholder="https://motiongit.com"/>
+    <label>API Key（mgk_ 开头，motiongit.com/settings/api 生成）</label>
+    <input id="setMgKey" type="password" placeholder="mgk_…"/>
+    <label>默认配音模型</label>
+    <select id="setMgModel">
+      <option value="volc-tts-2.0">火山引擎 · 高品质 2.0（推荐，带词级时间轴）</option>
+      <option value="volc-tts">火山引擎 · 标准</option>
+    </select>
+    <label>默认音色</label>
+    <select id="setMgVoice"></select>
+    <div class="row">
+      <button class="btn" onclick="testMotionGit()" id="btnTestMg">测试连接 / 查积分</button>
+      <button class="btn" onclick="refreshMgVoices()">刷新音色目录</button>
+    </div>
+    <div id="mgTestMsg" class="tip">配音 5 积分/100 字，生图 4 积分/张；素材/贴纸/音乐检索免费（每天 30 次，上海时间午夜重置）。Key 只存服务器，页面不回传明文。</div>
 
     <h3>公司信息（片头片尾用）</h3>
     <label>简称</label><input id="setShort"/>

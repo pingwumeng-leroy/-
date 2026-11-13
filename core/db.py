@@ -127,6 +127,10 @@ MIGRATIONS = [
     # 文案 v2：分段节奏/素材提示 + 原创性查重结果
     "ALTER TABLE scripts ADD COLUMN segments TEXT DEFAULT '[]'",
     "ALTER TABLE scripts ADD COLUMN originality TEXT DEFAULT '{}'",
+    # 出片模式扩展：口播剪辑 / MotionGit 模板 / 无原片 TTS 成片
+    "ALTER TABLE jobs ADD COLUMN render_mode TEXT DEFAULT 'talk'",
+    "ALTER TABLE jobs ADD COLUMN motion_package TEXT DEFAULT ''",
+    "ALTER TABLE jobs ADD COLUMN motion_input TEXT DEFAULT '{}'",
 ]
 
 _local = threading.local()
@@ -293,11 +297,14 @@ def delete_script(sid):
 
 
 # ---------- jobs ----------
-def add_job(script_id, video_path, template_id):
+def add_job(script_id, video_path, template_id, render_mode="talk",
+            motion_package="", motion_input=None):
     return execute(
-        "INSERT INTO jobs(script_id,video_path,template_id,status,progress,log,created_at) "
-        "VALUES(?,?,?,'queued',0,'',?)",
-        (script_id, video_path, template_id, now()))
+        "INSERT INTO jobs(script_id,video_path,template_id,render_mode,motion_package,"
+        "motion_input,status,progress,log,created_at) "
+        "VALUES(?,?,?,?,?,?,'queued',0,'',?)",
+        (script_id, video_path, template_id, render_mode, motion_package,
+         dumps(motion_input or {}), now()))
 
 
 def update_job(jid, **kw):

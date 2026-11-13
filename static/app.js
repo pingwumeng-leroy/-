@@ -25,7 +25,7 @@ function gotoStep(id) {
   document.querySelectorAll('.step').forEach(s => s.classList.toggle('active', s.dataset.target === id));
   window.scrollTo({top: 0, behavior: 'smooth'});
   if (id === 's4') loadShootScripts();
-  if (id === 's5') loadJobs();
+  if (id === 's5') { loadJobs(); loadMotionPackages(); syncVoiceSelects(); }
 }
 document.querySelectorAll('.step').forEach(s => s.onclick = () => gotoStep(s.dataset.target));
 
@@ -33,7 +33,7 @@ document.querySelectorAll('.step').forEach(s => s.onclick = () => gotoStep(s.dat
 async function boot() {
   try {
     const s = await api('/api/state');
-    STATE = {templates: s.templates, llm: s.llm_enabled, asr: s.asr_enabled};
+    STATE = {templates: s.templates, llm: s.llm_enabled, asr: s.asr_enabled, motiongit: s.motiongit_enabled};
     $('brandSub').textContent = s.company.name || '四川合胜宏科技集团有限公司';
     const b = $('engineBadge');
     b.textContent = s.llm_enabled ? 'AI 已接入' : '内置引擎模式';
@@ -697,27 +697,67 @@ bindUpload('fileTalk','dropTalk', async f => {
   } catch (e) { $('talkInfo').textContent = '上传失败：' + e.message; toast('上传失败：'+e.message); }
 });
 
-/* ---------- 5 剪辑 ---------- */
+/* ---------- 5 剪辑（三种模式：口播 / 无原片TTS / MotionGit模板） ---------- */
+function skipShoot() { toast('已跳过拍摄，直接去剪辑出片'); gotoStep('s5'); }
+
+function setRenderMode(mode) {
+  CUR.renderMode = mode;
+  document.querySelectorAll('.modetab').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+  $('modeTalk').classList.toggle('hidden', mode !== 'talk');
+  $('modeTts').classList.toggle('hidden', mode !== 'tts');
+  $('modeMotion').classList.toggle('hidden', mode !== 'motion');
+  if (mode === 'motion') { loadMotionPackages(); syncVoiceSelects(); }
+  if (mode === 'tts') syncVoiceSelects();
+}
+
+const RENDER_BTNS = ['btnRender', 'btnRenderTts', 'btnRenderMotion'];
+function setRenderBtns(disabled) { RENDER_BTNS.forEach(b => { const el = $(b); if (el) el.disabled = disabled; }); }
+
 async function startRender() {
   const sid = $('shootScript').value;
-  if (!sid) return toast('请先选择文案');
-  if (!CUR.talkPath) return toast('请先上传口播原片');
-  // 临时覆盖模板参数
-  const t = STATE.templates.find(x=>x.id===$('tplSelect').value);
-  if (t) {
-    t.trim_head = +$('ovTrimHead').value || 0;
-    t.trim_tail = +$('ovTrimTail').value || 0;
-    t.speed = Math.min(2, Math.max(.5, +$('ovSpeed').value || 1));
-    await api('/api/templates', {method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify(STATE.templates)}).catch(()=>{});
+  if (!sid) return toast('请先在第 3 步定稿并选定一份文案');
+  const mode = CUR.renderMode || 'talk';
+
+  if (mode === 'talk') {
+    if (!CUR.talkPath) return toast('口播模式需先在第 4 步上传原片');
+    const t = STATE.templates.find(x => x.id === $('tplSelect').value);
+    if (t) {
+      t.trim_head = +$('ovTrimHead').value || 0;
+      t.trim_tail = +$('ovTrimTail').value || 0;
+      t.speed = Math.min(2, Math.max(.5, +$('ovSpeed').value || 1));
+      await api('/api/templates', {method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(STATE.templates)}).catch(()=>{});
+    }
+    return launchRender({script_id:+sid, render_mode:'talk', video_path:CUR.talkPath,
+                         template_id:$('tplSelect').value});
   }
-  $('btnRender').disabled = true;
+  if (mode === 'tts') {
+    const opts = {voice:$('ttsVoice').value, accent:$('ttsAccent').value.trim(), bg:$('ttsBg').value.trim()};
+    if (STATE.motiongit) { opts.voice_provider = 'motiongit'; opts.mg_voice = $('ttsVoice').value; }
+    return launchRender({script_id:+sid, render_mode:'tts', tts_opts:opts});
+  }
+  if (mode === 'motion') {
+    const pkg = $('motionPkg').value;
+    if (!pkg) return toast('请先上传并选择一个 .motion 模板包');
+    const selected = [...document.querySelectorAll('#motionScenes input:checked')].map(c => c.value);
+    const mv = $('motionVoice').value;
+    const opts = {selected};
+    if (mv) { opts.voice = mv; opts.mg_voice = mv; opts.voice_provider = STATE.motiongit ? 'motiongit' : 'edge'; }
+    return launchRender({script_id:+sid, render_mode:'motion', motion_package:pkg, motion_input:opts});
+  }
+}
+
+async function launchRender(payload) {
+  setRenderBtns(true);
+  $('downloadBtn').classList.add('hidden');
+  $('renderStatus').textContent = '已提交，排队中…';
   try {
     const job = await api('/api/clips/render', {method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({script_id:+sid, video_path:CUR.talkPath, template_id:$('tplSelect').value})});
-    toast('已开始剪辑，请稍候'); pollJob(job.id); await loadJobs();
-  } catch (e) { toast('启动失败：'+e.message); $('btnRender').disabled = false; }
+      body:JSON.stringify(payload)});
+    toast('已开始出片，请稍候'); pollJob(job.id); await loadJobs();
+  } catch (e) { toast('启动失败：' + e.message); setRenderBtns(false); }
 }
+
 function pollJob(id) {
   clearInterval(POLL);
   POLL = setInterval(async () => {
@@ -726,28 +766,33 @@ function pollJob(id) {
       $('renderStatus').innerHTML = `状态：<b>${j.status}</b>　进度 ${j.progress}%\n` +
         `<div class="bar"><div style="width:${j.progress}%"></div></div>` + esc(j.log || '');
       if (j.status === 'done') {
-        clearInterval(POLL); $('btnRender').disabled = false;
-        $('previewBox').innerHTML = `<video controls src="${j.download}" poster=""></video>`;
-        const d = $('downloadBtn'); d.href = j.download.replace('/api/outputs/','/api/outputs/') + '/download';
-        d.classList.remove('hidden'); toast('剪辑完成，可以下载了'); await loadJobs();
+        clearInterval(POLL); setRenderBtns(false);
+        $('previewBox').innerHTML = `<video controls src="${j.download}"></video>`;
+        const d = $('downloadBtn'); d.href = j.download + '/download'; d.classList.remove('hidden');
+        toast('出片完成，可以下载了'); await loadJobs();
       } else if (j.status === 'failed') {
-        clearInterval(POLL); $('btnRender').disabled = false;
-        $('renderStatus').textContent = '失败：' + (j.error||''); toast('剪辑失败，看右侧日志');
+        clearInterval(POLL); setRenderBtns(false);
+        $('renderStatus').textContent = '失败：' + (j.error || ''); toast('出片失败，看左侧日志');
       }
     } catch (e) { clearInterval(POLL); }
   }, 1500);
 }
+
 async function loadJobs() {
   const list = await api('/api/jobs');
   $('nJobs').textContent = list.length + ' 个任务';
-  $('jobList').innerHTML = list.length ? list.map(j=>`
-    <div class="item"><div class="body">
-      <div class="t">任务 #${j.id} · ${esc(j.template_id)}</div>
+  $('jobList').innerHTML = list.length ? list.map(j => {
+    const mode = j.render_mode || 'talk';
+    const label = mode === 'motion' ? ('模板 ' + (j.motion_package || ''))
+                : mode === 'tts' ? '无原片TTS' : (j.template_id || 'standard');
+    return `<div class="item"><div class="body">
+      <div class="t">任务 #${j.id} · ${esc(label)}</div>
       <div class="d">${esc(j.created_at)} · ${j.output_path ? esc(j.output_path.split('/').pop()) : (j.error||'').slice(0,80)}</div>
     </div><div class="acts">
       <span class="pill ${j.status==='done'?'ok':(j.status==='failed'?'warn':'blue')}">${j.status}</span>
       ${j.status==='done' ? `<button class="btn" onclick="playJob(${j.id})">查看</button>` : ''}
-    </div></div>`).join('') : '<div class="empty">还没有剪辑任务。</div>';
+    </div></div>`;
+  }).join('') : '<div class="empty">还没有剪辑任务。</div>';
 }
 async function playJob(id) {
   const j = await api(`/api/jobs/${id}`);
@@ -755,6 +800,71 @@ async function playJob(id) {
   const d = $('downloadBtn'); d.href = j.download + '/download'; d.classList.remove('hidden');
   gotoStep('s5');
 }
+
+/* ---------- MotionGit 模板包 & 配音 ---------- */
+let MOTION_PKGS = [];
+async function loadMotionPackages() {
+  try { MOTION_PKGS = await api('/api/motion/packages'); } catch (e) { MOTION_PKGS = []; }
+  const sel = $('motionPkg');
+  if (!MOTION_PKGS.length) {
+    sel.innerHTML = '<option value="">（还没有模板包，先上传 .motion）</option>';
+    $('motionPkgMeta').textContent = '还没有模板包。把在 MotionGit 官网下载的 .motion 上传到这里即可真对接出片（配音/素材走 Creator API，成片本机渲染）。';
+    $('motionScenes').innerHTML = '<span class="muted">先上传模板包</span>';
+    return;
+  }
+  sel.innerHTML = MOTION_PKGS.map(m => `<option value="${esc(m.name)}">${esc(m.name)}（${esc(m.profile||'?')}）</option>`).join('');
+  onMotionPkg();
+}
+function onMotionPkg() {
+  const name = $('motionPkg').value;
+  const m = MOTION_PKGS.find(x => x.name === name);
+  if (!m) return;
+  const layouts = (m.layouts || []).join('/') || '?';
+  $('motionPkgMeta').innerHTML = `入口 <b>${esc(m.entry||'—')}</b>｜画幅 ${esc(layouts)}｜场景 ${(m.scenes||[]).length} 个｜配音槽 ${esc((m.voice_modes||[]).join('/'))}` +
+    (m.notes && m.notes.length ? `<br><span class="muted">${esc(m.notes.join('；'))}</span>` : '');
+  const sc = m.scenes || [];
+  $('motionScenes').innerHTML = sc.length ? sc.map(s => `
+    <label><input type="checkbox" value="${esc(s.id)}" checked/> ${esc(s.id)} ${s.start!=null?`<span class="muted">(${s.start}s–${s.end}s)</span>`:''}</label>`).join('')
+    : '<span class="muted">该包未声明原生场景，将按内容自动编排</span>';
+}
+async function uploadMotion(file) {
+  const fd = new FormData(); fd.append('file', file);
+  $('motionPkgMeta').textContent = '上传并解包中…';
+  try {
+    const meta = await api('/api/motion/packages', {method:'POST', body:fd});
+    toast('模板包已安装：' + meta.name); await loadMotionPackages();
+  } catch (e) { $('motionPkgMeta').textContent = '上传失败：' + e.message; }
+}
+async function previewMotion() {
+  const pkg = $('motionPkg').value, sid = $('shootScript').value;
+  if (!pkg) return toast('先选模板包');
+  if (!sid) return toast('先在第 3 步定稿一份文案');
+  const selected = [...document.querySelectorAll('#motionScenes input:checked')].map(c => c.value);
+  $('motionPreview').textContent = '生成中…';
+  try {
+    const r = await api('/api/motion/preview', {method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({package:pkg, script_id:+sid, opts:{selected}})});
+    $('motionPreview').textContent = JSON.stringify(r.input, null, 2);
+    toast('已生成输入预览（启发式映射，可在下方核对）');
+  } catch (e) { $('motionPreview').textContent = '预览失败：' + e.message; }
+}
+async function syncVoiceSelects() {
+  if (!STATE.motiongit) return;
+  try {
+    const st = await api('/api/motiongit/status');
+    const opts = (st.voices || []).map(([id, name]) => `<option value="${id}">${esc(name)}（MotionGit）</option>`).join('');
+    if (opts) {
+      $('motionVoice').innerHTML = '<option value="">不配音</option>' + opts;
+      $('ttsVoice').innerHTML = opts;
+    }
+  } catch (e) {}
+}
+
+/* .motion 文件选择绑定 */
+(function bindMotionFile() {
+  const fm = document.getElementById('fileMotion');
+  if (fm) fm.onchange = e => { if (e.target.files[0]) uploadMotion(e.target.files[0]); };
+})();
 
 /* ---------- 设置 ---------- */
 function openSettings() { $('mask').classList.remove('hidden'); $('drawer').classList.add('open'); loadSettings(); }
@@ -786,6 +896,13 @@ async function loadSettings() {
   $('setCommentPages').value = hv.comment_pages || 3;
   $('setUseAsr').value = String(!!hv.use_asr);
   $('setWhisperModel').value = hv.whisper_model || 'small';
+  const mg = s.motiongit || {};
+  $('setMgEnabled').value = String(!!mg.enabled);
+  $('setMgUrl').value = mg.base_url || 'https://motiongit.com';
+  $('setMgKey').value = '';
+  $('setMgKey').placeholder = mg.api_key ? '已保存（' + mg.api_key + '），留空不修改' : 'mgk_…';
+  $('setMgModel').value = mg.default_model || 'volc-tts-2.0';
+  await populateMgVoices(mg.default_voice);
   await loadSeeds();
   $('tplEditor').innerHTML = STATE.templates.map((t,i)=>`
     <div class="tplrow"><b>${esc(t.name)}</b>
@@ -817,12 +934,17 @@ async function saveSettings() {
     harvest:{max_calls:+$('setMaxCalls').value || 60,
              comment_pages:+$('setCommentPages').value || 3,
              use_asr:$('setUseAsr').value === 'true',
-             whisper_model:$('setWhisperModel').value}
+             whisper_model:$('setWhisperModel').value},
+    motiongit:{enabled:$('setMgEnabled').value === 'true',
+               base_url:$('setMgUrl').value.trim() || 'https://motiongit.com',
+               default_model:$('setMgModel').value,
+               default_voice:$('setMgVoice').value}
   };
   if ($('setLlmKey').value) data.llm.api_key = $('setLlmKey').value;
   if ($('setAsrKey').value) data.asr.api_key = $('setAsrKey').value;
   if ($('setAuthPwd').value) data.auth.password = $('setAuthPwd').value;
   if ($('setTikhubKey').value) data.search.tikhub.api_key = $('setTikhubKey').value;
+  if ($('setMgKey').value) data.motiongit.api_key = $('setMgKey').value;
   try {
     await api('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
     $('setMsg').textContent = authOn
@@ -833,6 +955,7 @@ async function saveSettings() {
     const b = $('engineBadge'); b.textContent = s.llm_enabled?'AI 已接入':'内置引擎模式';
     b.className = 'badge ' + (s.llm_enabled?'on':'off');
     STATE.llm = s.llm_enabled;
+    STATE.motiongit = s.motiongit_enabled;
     STATE.authHasPwd = authOn;
     return true;
   } catch (e) { $('setMsg').textContent = '保存失败：'+e.message; return false; }
@@ -880,6 +1003,42 @@ async function testLLM() {
   } catch (e) {
     box.textContent = '✗ 测试失败：' + e.message;
   } finally { btn.disabled = false; }
+}
+
+async function populateMgVoices(selected) {
+  try {
+    const st = await api('/api/motiongit/status');
+    const opts = (st.voices || []).map(([id, name]) => `<option value="${id}">${esc(name)}</option>`).join('');
+    $('setMgVoice').innerHTML = opts || '<option value="">（未获取到音色，点右侧刷新）</option>';
+    if (selected) $('setMgVoice').value = selected;
+  } catch (e) {
+    $('setMgVoice').innerHTML = '<option value="">（音色目录获取失败）</option>';
+  }
+}
+async function refreshMgVoices() {
+  toast('获取全量中文音色…');
+  try {
+    const r = await api('/api/motiongit/voices?limit=100&language=zh-cn');
+    const items = r.items || [];
+    if (!items.length) return toast('未取到中文音色');
+    $('setMgVoice').innerHTML = items.map(it =>
+      `<option value="${esc(it.id)}">${esc(it.name)}（${it.gender}）</option>`).join('');
+    toast('已加载 ' + items.length + ' 个音色');
+  } catch (e) { toast('音色获取失败：' + e.message); }
+}
+async function testMotionGit() {
+  const btn = $('btnTestMg'), box = $('mgTestMsg');
+  btn.disabled = true; box.textContent = '正在保存并连接 MotionGit…';
+  try {
+    if (!await saveSettings()) { box.textContent = '设置保存失败'; return; }
+    const r = await api('/api/motiongit/test', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+    if (!r.ok) { box.textContent = '✗ ' + (r.error || '连接失败'); return; }
+    const c = r.credits || {};
+    box.textContent = '✓ 连接正常｜剩余积分 ' + (c.total ?? '?') +
+      '（本月免费 ' + (c.monthlyFree ?? '?') + '，已用 ' + (c.used ?? '?') + '）';
+    toast('MotionGit 连接正常');
+  } catch (e) { box.textContent = '✗ ' + e.message; }
+  finally { btn.disabled = false; }
 }
 
 async function saveTemplates() {

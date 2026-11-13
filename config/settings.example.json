@@ -40,5 +40,14 @@
     "comment_pages": 3,
     "use_asr": false,
     "whisper_model": "small"
+  },
+  "motiongit": {
+    "enabled": false,
+    "base_url": "https://motiongit.com",
+    "api_key": "",
+    "default_model": "volc-tts-2.0",
+    "default_voice": "zh_male_ruyayichen_saturn_bigtts",
+    "prefer_for_voice": true,
+    "_hint": "MotionGit Creator API：给自己的 .motion 模板准备素材与配音（成片仍本地渲染）。在 motiongit.com/settings/api 生成 Key（mgk_ 开头）填这里。配音 5 积分/100 字，生图 4 积分/张；素材/贴纸/音乐检索免费（每天 30 次）。"
   }
 }

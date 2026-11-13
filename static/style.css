@@ -56,9 +56,29 @@ input,select,textarea{width:100%;border:1px solid #dce1e9;border-radius:8px;padd
 input:focus,select:focus,textarea:focus{border-color:var(--accent2);box-shadow:0 0 0 3px rgba(47,107,255,.09)}
 textarea{resize:vertical;line-height:1.65}
 .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .row{display:flex;gap:9px;align-items:center;flex-wrap:wrap;margin-top:13px}
 .muted{color:var(--muted);font-size:12.5px}
 .tip{font-size:11.5px;color:var(--muted);margin-top:10px;line-height:1.6}
+
+/* 第 5 步：三种出片模式切换 */
+.modetabs{display:flex;gap:8px;margin:0 0 18px;flex-wrap:wrap}
+.modetab{border:1px solid #d9dee7;background:#fff;color:var(--text);padding:9px 16px;
+  border-radius:20px;font-size:13px;cursor:pointer;transition:.15s}
+.modetab:hover{border-color:var(--accent2)}
+.modetab.active{background:var(--accent);color:#fff;border-color:var(--accent);font-weight:600}
+.modebody{display:block}
+.modebody.hidden{display:none}
+.checks{display:flex;flex-direction:column;gap:7px;margin-top:4px;max-height:220px;overflow:auto;
+  border:1px solid #e4e8ef;border-radius:8px;padding:10px;background:#fff}
+.checks label{display:flex;align-items:center;gap:9px;margin:0;font-size:13px;color:var(--text);cursor:pointer}
+.checks input{width:auto;margin:0}
+.codebox{background:#0e1a24;color:#cfe3ff;font-size:11.5px;line-height:1.5;border-radius:8px;
+  padding:12px;max-height:260px;overflow:auto;white-space:pre-wrap;word-break:break-all;margin-top:10px}
+.filebtn{display:inline-block;border:1px dashed #c2cad6;background:#fff;color:var(--accent2);
+  padding:9px 14px;border-radius:8px;font-size:12.5px;cursor:pointer;margin-top:8px;transition:.15s}
+.filebtn:hover{border-color:var(--accent2);background:#f3f8ff}
+.filebtn input{display:none}
 
 .btn{border:1px solid #d9dee7;background:#fff;color:var(--text);padding:9px 15px;border-radius:8px;
   font-size:13px;font-family:inherit;cursor:pointer;transition:.15s;white-space:nowrap}

@@ -62,6 +62,15 @@ DEFAULT_SETTINGS = {
         },
         "_hint": "provider=mock 用内置演示数据跑通全链路；填好 TikHub Key 后改成 tikhub 即切真实数据，代码零改动。"
     },
+    "motiongit": {
+        "enabled": False,
+        "base_url": "https://motiongit.com",
+        "api_key": "",
+        "default_model": "volc-tts-2.0",
+        "default_voice": "zh_male_ruyayichen_saturn_bigtts",
+        "prefer_for_voice": True,
+        "_hint": "MotionGit Creator API：给自己的 .motion 模板准备素材与配音（成片仍在本地渲染）。在 motiongit.com/settings/api 生成 Key（mgk_ 开头）填这里，充值后即可用高品质配音（5 积分/100 字）与生图（4 积分/张）；素材/贴纸/音乐检索免费（每天 30 次）。"
+    },
     "harvest": {
         "default_count": 15,
         "max_calls": 60,
@@ -193,7 +202,7 @@ def save_settings(data):
     _ensure()
     with _lock:
         cur = _read(SETTINGS_PATH, DEFAULT_SETTINGS)
-        for key in ("llm", "asr", "fetch", "company", "auth", "search", "harvest"):
+        for key in ("llm", "asr", "fetch", "company", "auth", "search", "harvest", "motiongit"):
             if key in data and isinstance(data[key], dict):
                 cur.setdefault(key, {})
                 for k, v in data[key].items():

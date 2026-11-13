@@ -11,8 +11,28 @@
 | 1 找素材 | 抖音链接采集 / 上传本地视频 / 手填文案 | 提取口播内容 |
 | 2 看分析 | 单条分析 + 批量采集报告 | 结构化报告写入 `reports` 表 |
 | 3 出文案 | 输入要求，一键生成原创脚本 | 只复用抽象结论，不复用同行原文 |
-| 4 拍口播 | 定稿文案 + 上传口播视频 | 老板只需按稿拍 |
-| 5 剪成片 | 后台自动剪辑 | 片头/片尾卡片、ASS 中文字幕、水印、竖屏 9:16、H.264/AAC |
+| 4 拍口播 | 定稿文案 + 上传口播视频 | 老板只需按稿拍（可一键跳过，直接去剪辑） |
+| 5 剪成片 | 后台自动剪辑 | 三种出片：口播剪辑 / 无原片 TTS 成片 / MotionGit 模板 |
+
+## 三种出片方式（第 5 步）
+
+| 模式 | 需要什么 | 说明 |
+| --- | --- | --- |
+| 口播剪辑 | 第 4 步上传的口播原片 | 内置 FFmpeg 模板：片头/片尾、ASS 中文字幕、水印、竖屏 9:16 |
+| 无原片·TTS 成片 | 只要一份定稿文案 | edge-tts 念文案当配音 + PIL 卡片 + ffmpeg 合成，零成本、零外部依赖 |
+| MotionGit 模板 | 官网下载的 `.motion` 工程包 | 真对接：包自带渲染管线（adapter.py / render.mjs / headless Chrome），动效 100% 还原 |
+
+### MotionGit Creator API（配音 / 生图 / 素材）
+
+Creator API 只准备「素材 + 配音 + 编排」，**成片仍在本机渲染**。在设置页填 MotionGit Key（`mgk_` 开头，[motiongit.com/settings/api](https://motiongit.com/settings/api) 生成）：
+
+- 配音：`volc-tts-2.0` 火山引擎高品质，5 积分/100 字，446 个音色、31 种语言、带词级时间轴（比 edge-tts 强很多）
+- 生图：4 积分/张
+- 素材/贴纸/音乐检索：**0 积分**（每账号每天 30 次，上海时间午夜重置）
+
+调用链：`POST /api/v1/quotes`（报价）→ `POST /api/v1/generations`（提交，带 `Idempotency-Key`）→ `GET /api/v1/tasks/{id}`（轮询）→ `GET /api/v1/assets/{id}/download`（下载）。鉴权统一 `Authorization: Bearer <Key>`。
+
+> 没有 `.motion` 包也能用 TTS 模式先出片；有了真包再切「MotionGit 模板」出精细动效。未配置 Key 时，配音自动回落 edge-tts（免费）。
 
 ## 本地快速启动
 

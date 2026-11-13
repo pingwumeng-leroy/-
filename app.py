@@ -12,7 +12,7 @@ import traceback
 
 from flask import Flask, Response, jsonify, request, send_file, send_from_directory, render_template
 
-from core import analyze, config, db, editor, generate, harvest, ingest, llm, providers
+from core import analyze, config, db, editor, generate, harvest, ingest, llm, motion, motiongit, providers
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024  # 1GB
@@ -84,6 +84,7 @@ def api_state():
         "stats": db.stats(),
         "llm_enabled": llm.available(),
         "asr_enabled": bool(s["asr"].get("enabled") and s["asr"].get("api_key")),
+        "motiongit_enabled": motiongit.available(),
         "templates": config.get_templates(),
         "company": s.get("company", {}),
         "sensitive_count": len(config.get_sensitive_words()),
@@ -104,6 +105,10 @@ def _mask_settings(s):
             out[k]["api_key"] = key[:4] + "****" + key[-4:]
     if out.get("auth", {}).get("password"):
         out["auth"]["password"] = "********"
+    mg = out.get("motiongit", {})
+    if isinstance(mg, dict) and mg.get("api_key"):
+        case = mg["api_key"]
+        out["motiongit"] = dict(mg, api_key=case[:6] + "****" + case[-4:])
     tk = out.get("search", {}).get("tikhub", {})
     if isinstance(tk, dict) and tk.get("api_key"):
         masked = dict(tk)
@@ -118,7 +123,7 @@ def api_settings():
         return ok(_mask_settings(config.get_settings()))
     data = request.get_json(force=True, silent=True) or {}
     # 脱敏值不覆盖已保存的密钥
-    for k in ("llm", "asr"):
+    for k in ("llm", "asr", "motiongit"):
         if k in data and isinstance(data[k], dict):
             v = data[k].get("api_key", "")
             if "****" in str(v):
@@ -527,15 +532,148 @@ def api_clip_upload():
 @app.route("/api/clips/render", methods=["POST"])
 def api_clip_render():
     d = request.get_json(force=True, silent=True) or {}
-    sid, path = d.get("script_id"), d.get("video_path")
+    sid = d.get("script_id")
     tid = d.get("template_id", "standard")
+    mode = (d.get("render_mode") or "talk").strip()
     if not db.get_script(int(sid) if str(sid).isdigit() else 0):
         return err("文案不存在")
-    if not path or not os.path.exists(path):
-        return err("口播视频不存在，请重新上传")
-    jid = db.add_job(int(sid), path, tid)
-    editor.start_render(jid)
+
+    if mode == "talk":
+        path = d.get("video_path")
+        if not path or not os.path.exists(path):
+            return err("口播视频不存在，请重新上传")
+        jid = db.add_job(int(sid), path, tid, render_mode="talk")
+        editor.start_render(jid)
+    elif mode == "tts":
+        # 无原片：edge-tts 配音 + 卡片成片
+        jid = db.add_job(int(sid), "", tid, render_mode="tts",
+                         motion_input=d.get("tts_opts", {}))
+        motion.start_tts(jid)
+    elif mode == "motion":
+        pkg = d.get("motion_package") or ""
+        if not motion.get_package(pkg):
+            return err("未找到 MotionGit 模板包「%s」，请先在设置页上传 .motion" % pkg)
+        jid = db.add_job(int(sid), "", tid, render_mode="motion",
+                         motion_package=pkg, motion_input=d.get("motion_input", {}))
+        motion.start_motion(jid)
+    else:
+        return err("未知出片模式：%s" % mode)
     return ok(db.get_job(jid))
+
+
+# ---------------- MotionGit 模板包管理 ----------------
+@app.route("/api/motion/packages", methods=["GET", "POST", "DELETE"])
+def api_motion_packages():
+    if request.method == "GET":
+        return ok(motion.list_packages())
+    if request.method == "DELETE":
+        # 批量清空：body 不传 name 则清空全部
+        name = (request.get_json(force=True, silent=True) or {}).get("name")
+        removed = motion.remove_package(name) if name else motion.remove_all_packages()
+        return ok({"removed": removed})
+    # POST：上传 .motion 文件
+    f = request.files.get("file")
+    if not f or os.path.splitext(f.filename)[1].lower() != ".motion":
+        return err("请上传 .motion 工程包")
+    path = ingest.save_upload(f, "motion")
+    try:
+        pkg = motion.MotionPackage.install(path)
+        return ok(pkg.meta)
+    except Exception as exc:
+        return err("解包失败：%s" % exc)
+
+
+@app.route("/api/motion/packages/<name>", methods=["DELETE"])
+def api_motion_package(name):
+    removed = motion.remove_package(name)
+    return ok({"removed": removed})
+
+
+@app.route("/api/motion/preview", methods=["POST"])
+def api_motion_preview():
+    """干跑：根据包 schema 把文案映射成 user.json，返回预览（不真正渲染）。"""
+    d = request.get_json(force=True, silent=True) or {}
+    pkg = motion.get_package(d.get("package") or "")
+    if not pkg:
+        return err("未找到模板包")
+    sid = d.get("script_id")
+    script = db.get_script(int(sid) if str(sid).isdigit() else 0) if sid else {}
+    if not script:
+        return err("文案不存在")
+    opts = d.get("opts", {})
+    ui, _ = motion.build_input(script, pkg, opts)
+    return ok({"input": ui, "meta": pkg.meta, "validate_note":
+               "此预览为启发式自动映射，凡不确定的槽位请在模板页手工补齐"})
+
+
+# ---------------- MotionGit Creator API（素材+配音，成片仍本地渲染） ----------------
+@app.route("/api/motiongit/status")
+def api_mg_status():
+    mg = config.get_settings().get("motiongit", {})
+    out = {"configured": motiongit.available(),
+           "base_url": motiongit.base_url(),
+           "default_model": mg.get("default_model"),
+           "default_voice": mg.get("default_voice"),
+           "voices": motiongit.CURATED_VOICES}
+    if not motiongit.available():
+        out["hint"] = "在「设置 → MotionGit」填 Key（mgk_ 开头）并启用，即可用平台高品质配音与生图"
+        return ok(out)
+    try:
+        me = motiongit.me()
+        out["credits"] = me.get("credits")
+        out["key"] = me.get("key")
+    except motiongit.MotionGitError as exc:
+        out["error"] = str(exc)
+    try:
+        us = motiongit.usage()
+        out["free_material"] = us.get("free_material_requests")
+        out["models"] = [{"model": m.get("model"), "capability": m.get("capability"),
+                          "available": m.get("available")}
+                         for m in (us.get("models") or [])]
+    except motiongit.MotionGitError:
+        pass
+    return ok(out)
+
+
+@app.route("/api/motiongit/voices")
+def api_mg_voices():
+    try:
+        return ok(motiongit.voices(
+            q=request.args.get("q") or None,
+            gender=request.args.get("gender") or None,
+            language=request.args.get("language") or None,
+            page=int(request.args.get("page") or 1),
+            limit=min(100, int(request.args.get("limit") or 50))))
+    except motiongit.MotionGitError as exc:
+        return err(str(exc))
+
+
+@app.route("/api/motiongit/test", methods=["POST"])
+def api_mg_test():
+    if not motiongit.available():
+        return ok({"ok": False, "error": "未启用或未填写 Key，请先在设置里保存"})
+    try:
+        me = motiongit.me()
+        return ok({"ok": True, "credits": me.get("credits"), "user": me.get("user"),
+                   "key": me.get("key"), "message": "连接正常"})
+    except motiongit.MotionGitError as exc:
+        return ok({"ok": False, "error": str(exc), "status": exc.status,
+                   "code": exc.code})
+
+
+@app.route("/api/motiongit/quote", methods=["POST"])
+def api_mg_quote():
+    """配音/生图报价（不扣点），前端可在提交前展示预计积分。"""
+    d = request.get_json(force=True, silent=True) or {}
+    cap = d.get("capability") or "tts.speak"
+    model = d.get("model") or config.get_settings().get("motiongit", {}).get("default_model", "volc-tts-2.0")
+    inp = d.get("input") or {}
+    if not motiongit.available():
+        return err("未配置 MotionGit Key")
+    try:
+        return ok(motiongit.quote(cap, model, inp))
+    except motiongit.MotionGitError as exc:
+        return err(str(exc))
 
 
 @app.route("/api/jobs")
@@ -590,6 +728,10 @@ def bootstrap():
         os.access(config.DATA, os.W_OK), os.access(config.CONFIG_DIR, os.W_OK)))
     print("[BOOT] LLM 已启用：", llm.available())
     print("[BOOT] 剪辑模板：", [t["name"] for t in config.get_templates()])
+    try:
+        print("[BOOT] MotionGit 模板包：", [m["name"] for m in motion.list_packages()])
+    except Exception:
+        pass
     print("[BOOT] 访问密码：", "已开启" if (a.get("enabled") and a.get("password"))
           else "未开启（内网模式）")
 
