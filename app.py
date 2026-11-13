@@ -34,8 +34,10 @@ def guard():
     ).decode("ascii")
     if secrets.compare_digest(request.headers.get("Authorization", ""), expected):
         return None
+    # realm 必须是纯 ASCII：HTTP header 按 latin-1 编码，中文会让 Werkzeug 抛
+    # UnicodeEncodeError，401 响应生成失败，反代侧表现为 502。
     return Response("需要访问密码", 401, {
-        "WWW-Authenticate": 'Basic realm="抖音内容工作台"',
+        "WWW-Authenticate": 'Basic realm="douyin-studio"',
         "Content-Type": "text/plain; charset=utf-8",
     })
 
