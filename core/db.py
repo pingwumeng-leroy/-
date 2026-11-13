@@ -124,6 +124,9 @@ MIGRATIONS = [
     "ALTER TABLE reports ADD COLUMN harvest_job_id INTEGER DEFAULT 0",
     "ALTER TABLE reports ADD COLUMN comment_count INTEGER DEFAULT 0",
     "ALTER TABLE reports ADD COLUMN publish_time INTEGER DEFAULT 0",
+    # 文案 v2：分段节奏/素材提示 + 原创性查重结果
+    "ALTER TABLE scripts ADD COLUMN segments TEXT DEFAULT '[]'",
+    "ALTER TABLE scripts ADD COLUMN originality TEXT DEFAULT '{}'",
 ]
 
 _local = threading.local()
@@ -250,23 +253,27 @@ def delete_report(rid):
 
 
 # ---------- scripts ----------
-def add_script(title, body, requirement, report_ids, engine, hits):
+def add_script(title, body, requirement, report_ids, engine, hits,
+               segments=None, originality=None):
     t = now()
     return execute(
         "INSERT INTO scripts(title,body,requirement,source_report_ids,engine,status,"
-        "sensitive_hits,note,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        "sensitive_hits,note,segments,originality,created_at,updated_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
         (title, body, json.dumps(requirement, ensure_ascii=False),
          json.dumps(report_ids, ensure_ascii=False), engine, "draft",
-         json.dumps(hits, ensure_ascii=False), "", t, t))
+         json.dumps(hits, ensure_ascii=False), "",
+         dumps(segments or []), dumps(originality or {}), t, t))
 
 
 def update_script(sid, **kw):
-    allowed = {"title", "body", "status", "note", "sensitive_hits"}
+    allowed = {"title", "body", "status", "note", "sensitive_hits",
+               "segments", "originality"}
     sets, vals = [], []
     for k, v in kw.items():
         if k in allowed:
             sets.append(f"{k}=?")
-            vals.append(dumps(v) if k == "sensitive_hits" else v)
+            vals.append(dumps(v) if k in ("sensitive_hits", "segments", "originality") else v)
     sets.append("updated_at=?")
     vals.append(now())
     vals.append(sid)
@@ -343,6 +350,23 @@ def get_harvest_job(jid):
 
 def list_harvest_jobs(limit=50):
     return q("SELECT * FROM harvest_jobs ORDER BY id DESC LIMIT ?", (limit,))
+
+
+def delete_harvest_job(jid):
+    """删除单条采集任务记录；reports 表里已入库的分析报告不受影响。"""
+    execute("DELETE FROM harvest_jobs WHERE id=?", (jid,))
+
+
+def clear_harvest_jobs():
+    """清空已结束的采集任务记录，运行中的保留。返回 (删除数, 保留数)。
+
+    不碰 reports / scripts / videos，也不重置自增序号：清空历史只影响第 2 步的
+    任务列表，经验库里的报告全部保留。
+    """
+    total = (one("SELECT COUNT(*) n FROM harvest_jobs") or {}).get("n", 0)
+    execute("DELETE FROM harvest_jobs WHERE status NOT IN ('queued','running')")
+    kept = (one("SELECT COUNT(*) n FROM harvest_jobs") or {}).get("n", 0)
+    return total - kept, kept
 
 
 def add_harvest_report(report, item, job_id, source_provider, engine="rule"):

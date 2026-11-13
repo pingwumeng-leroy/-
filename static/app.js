@@ -1,7 +1,7 @@
 /* 合胜宏 · 抖音内容工作台 前端逻辑 */
 const $ = id => document.getElementById(id);
 let STATE = {templates: [], llm: false, asr: false};
-let CUR = {scriptId: null, script: null, talkPath: null, reportOpen: {}};
+let CUR = {scriptId: null, script: null, talkPath: null, reportOpen: {}, policyCard: null};
 let POLL = null;
 let HPOLL = null;
 
@@ -148,26 +148,212 @@ function parseField(v) {
     : (typeof x === 'object' ? JSON.stringify(x, null, 1) : x); }
   catch (e) { return v; }
 }
+/* ---------- 报告详情：轻量 AI 十维，网页内详情页 ----------
+   只消费 report_json 里的 facts / ai_analysis 两个节点，不新增接口、不改表结构。
+   按确认结果渲染第一/二/三/四/六/八章；第五章「画面与剪辑」、
+   第七章「与博主最近作品对比」不生成也不渲染。                     */
+function num(v) {
+  if (v == null || v === '') return '—';
+  const n = Number(v);
+  return isNaN(n) ? '—' : n.toLocaleString('zh-CN');
+}
+function pct(v) { return v == null ? '—' : (Number(v) * 100).toFixed(1) + '%'; }
+function bullets(arr) {
+  const a = (arr || []).filter(x => x != null && String(x).trim());
+  return a.length ? a.map(x => `<li>${esc(x)}</li>`).join('') : '<li class="muted">—</li>';
+}
+function secHead(no, title) { return `<h4><i>${no}</i>${esc(title)}</h4>`; }
+function trCorrectLabel(trF) {
+  const corr = Array.isArray(trF.corrections) ? trF.corrections.filter(c => c && c.wrong && c.right) : [];
+  if (corr.length) {
+    const show = corr.slice(0, 5).map(c => `${esc(c.wrong)}→${esc(c.right)}`).join('、');
+    const more = corr.length > 5 ? ` 等 ${corr.length} 处` : '';
+    return `<span class="okpill">已校对：${show}${more}</span>`;
+  }
+  const note = String(trF.correct_note || '').trim();
+  return note ? `<span class="warnpill">未校对：${esc(note)}</span>` : '<span class="warnpill">未校对</span>';
+}
+function insightBox(txt) { return txt ? `<p class="insight">${esc(txt)}</p>` : ''; }
+function hasDeep(r) {
+  try {
+    const R = JSON.parse(r.report_json || 'null');
+    return !!(R && R.ai_analysis && R.facts);
+  } catch (e) { return false; }
+}
+function radarSVG(dims) {
+  const n = 10, cx = 120, cy = 105, R = 76;
+  const pt = (i, r) => {
+    const a = -Math.PI / 2 + i * 2 * Math.PI / n;
+    return [cx + Math.cos(a) * r, cy + Math.sin(a) * r];
+  };
+  const polygon = k => Array.from({length: n}, (_, i) =>
+    pt(i, R * k).map(v => v.toFixed(1)).join(',')).join(' ');
+  const rings = [0.25, 0.5, 0.75, 1].map(k =>
+    `<polygon points="${polygon(k)}" class="ring"/>`).join('');
+  const axes = Array.from({length: n}, (_, i) => {
+    const p = pt(i, R);
+    return `<line x1="${cx}" y1="${cy}" x2="${p[0].toFixed(1)}" y2="${p[1].toFixed(1)}" class="axis"/>`;
+  }).join('');
+  const vals = dims.slice(0, n).map(d => Math.max(1, Math.min(10, Number(d.score) || 5)) / 10);
+  while (vals.length < n) vals.push(0.5);
+  const area = vals.map((v, i) => pt(i, R * v).map(x => x.toFixed(1)).join(',')).join(' ');
+  const dots = vals.map((v, i) => {
+    const p = pt(i, R * v);
+    return `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="2.6"/>`;
+  }).join('');
+  const labels = Array.from({length: n}, (_, i) => {
+    const p = pt(i, R + 14);
+    return `<text x="${p[0].toFixed(1)}" y="${p[1].toFixed(1)}" text-anchor="middle" class="lab">${i + 1}</text>`;
+  }).join('');
+  const legend = dims.slice(0, n).map((d, i) =>
+    `<li><b>${i + 1}</b>${esc(d.name || '')}</li>`).join('');
+  return '<svg viewBox="0 0 240 210" class="radar" xmlns="http://www.w3.org/2000/svg">' +
+    rings + axes + `<polygon points="${area}" class="area"/>` + dots + labels + '</svg>' +
+    `<ol class="radarlegend">${legend}</ol>`;
+}
+function densityBars(curve) {
+  const a = Array.isArray(curve) ? curve : [];
+  if (!a.length) return '';
+  const vals = a.map(x => Number(x) || 0);
+  const mx = Math.max.apply(null, vals.concat([1]));
+  return '<div class="density">' + vals.map((v, i) =>
+    `<div class="drow"><span>${i * 10}–${(i + 1) * 10}%</span>` +
+    `<div class="track"><div style="width:${(v / mx * 100).toFixed(1)}%"></div></div>` +
+    `<b>${num(v)}</b></div>`).join('') + '</div>';
+}
+function renderDeepReport(r, R) {
+  const ai = R.ai_analysis || {}, f = R.facts || {};
+  const e = f.engagement || {}, t = f.title || {}, c = f.comments || null;
+  const ins = ai.insights || {}, dims = ai.dimensions || [];
+  const ratioRows = [
+    ['评论/点赞', e.comment_like_ratio],
+    ['收藏/点赞', e.collect_like_ratio],
+    ['转发/点赞', e.share_like_ratio]
+  ].map(([k, v]) => `<div class="ratiobar"><span>${k}</span>` +
+    `<div class="track"><div style="width:${v == null ? 0 : Math.min(100, Number(v) * 100).toFixed(1)}%"></div></div>` +
+    `<b>${pct(v)}</b></div>`).join('');
+  const tags = (t.hashtags || []).map(x => `<span class="tag">#${esc(x)}</span>`).join('') ||
+    '<span class="muted">无话题标签</span>';
+  const catBars = c ? (c.category_share || []).slice(0, 6).map(x =>
+    `<div class="cbar"><span>${esc(x.name)}</span>` +
+    `<div class="track"><div style="width:${(Number(x.ratio) * 100).toFixed(1)}%"></div></div>` +
+    `<b>${pct(x.ratio)}</b></div>`).join('') : '';
+  const topRows = c ? (c.top || []).map(x =>
+    `<tr><td class="num">${num(x.likes)}</td><td class="num">${num(x.replies)}</td>` +
+    `<td>${esc(x.text)}</td><td>${esc((x.cats || []).join('、'))}</td></tr>`).join('') : '';
+  const span = c && c.time_span
+    ? `${c.time_span.first} ~ ${c.time_span.last}（${c.time_span.days} 天）` : '—';
+  const dimRows = dims.map(d =>
+    `<tr><td>${esc(d.name)}</td><td class="num">${num(d.score)}</td>` +
+    `<td>${esc(d.finding)}</td><td>${esc(d.why_it_works)}</td><td>${esc(d.reusable)}</td></tr>`).join('');
+  const secs = num(f.duration && f.duration.seconds);
+  const trF = f.transcript || null;
+  const trBox = (trF && trF.has_transcript)
+    ? `<div class="trbox">
+        <div class="trline"><span class="k">前 3 秒原话</span><q>${esc(trF.hook_3s || '—')}</q></div>
+        <div class="trline"><span class="k">前 15 秒原话</span><q>${esc(trF.hook_15s || '—')}</q></div>
+        <div class="metrics">
+          <div class="metric"><span>语速</span><b>${trF.speech_rate_cpm == null ? '—' : num(trF.speech_rate_cpm) + ' 字/分'}</b></div>
+          <div class="metric"><span>逐字稿</span><b>${num(trF.chars)} 字</b></div>
+          <div class="metric"><span>长停顿</span><b>${num(trF.long_gaps)} 处</b></div>
+          <div class="metric"><span>钩子类型</span><b style="font-size:12px">${esc((trF.hook_types || []).join('、') || '未检出')}</b></div>
+        </div>
+        <div class="muted" style="margin:10px 0 4px">信息密度曲线（每 10% 时长的字数）</div>
+        ${densityBars(trF.density_curve)}
+        ${(trF.full_text || '').trim() ? `<details class="trfull"><summary>完整逐字稿（${num(trF.chars)} 字）</summary><pre>${esc(trF.full_text)}</pre></details>` : ''}
+        <p class="muted" style="margin:6px 0 0">来源 ${esc(trF.source || '本地转写')} · 共 ${num(trF.segments_count)} 段带时间戳字幕 · ${trCorrectLabel(trF)}</p>
+      </div>`
+    : `<div class="warnbox">⚠ 轻量档未下载视频、未做语音转写，<b>没有逐字稿</b>。本节仅为基于标题 / 视频文案 / 评论样本的钩子类型推断，不含前 3 秒原话、语速与信息密度曲线。</div>`;
+
+  return `<div class="rpt">
+    <div class="rpt-top">
+      <div class="rpt-meta">${esc(r.author || f.author || '—')} · ${secs} 秒 · ${num(e.likes)} 赞 · ${num(e.comments)} 评论 · ${esc(r.source_provider || '')} · 模型 ${esc(ai.model || '—')}</div>
+      <blockquote class="rpt-oneline">${esc(ai.one_line || r.summary || '—')}</blockquote>
+      <div class="rpt-sub"><b>关键爆款因素</b><ol>${bullets(ai.key_drivers)}</ol></div>
+      ${ai.formula ? `<div class="formula"><b>可套用公式：</b>${esc(ai.formula)}</div>` : ''}
+    </div>
+    <section class="rpt-sec">
+      ${secHead('一', '互动数据结构')}
+      <div class="metrics">
+        <div class="metric"><span>点赞</span><b>${num(e.likes)}</b></div>
+        <div class="metric"><span>评论</span><b>${num(e.comments)}</b></div>
+        <div class="metric"><span>收藏</span><b>${num(e.collects)}</b></div>
+        <div class="metric"><span>转发</span><b>${num(e.shares)}</b></div>
+      </div>
+      ${ratioRows}
+      ${insightBox(ins['1'])}
+      ${e.note ? `<p class="muted" style="margin-top:8px">${esc(e.note)}</p>` : ''}
+    </section>
+    <section class="rpt-sec">
+      ${secHead('二', '时长策略')}
+      <div class="metrics"><div class="metric"><span>视频时长</span><b>${secs}s</b></div></div>
+      ${insightBox(ins['2'])}
+    </section>
+    <section class="rpt-sec">
+      ${secHead('三', '标题与话题')}
+      <div>${tags}</div>
+      <p class="muted" style="margin:8px 0 0">标题正文 ${num(t.title_len)} 字 · ${t.has_number ? '含数字' : '无数字'} · ${t.has_question ? '含疑问/悬念' : '无疑问词'} · 地域词 ${esc(t.city_hit || '无')}</p>
+      ${insightBox(ins['3'])}
+    </section>
+    <section class="rpt-sec">
+      ${secHead('四', '开头钩子与讲述节奏')}
+      ${trBox}
+      <p style="margin:0">规则判定钩子类型：<b>${esc(r.hook_type || '—')}</b></p>
+      ${insightBox(ins['4'])}
+    </section>
+    <section class="rpt-sec">
+      ${secHead('六', '评论区')}
+      ${c ? `<div class="metrics">
+          <div class="metric"><span>样本条数</span><b>${num(c.count)}</b></div>
+          <div class="metric"><span>@ 好友</span><b>${num(c.mention_count)}</b></div>
+          <div class="metric"><span>时间跨度</span><b style="font-size:12px">${esc(span)}</b></div>
+        </div>
+        <div class="muted" style="margin-bottom:6px">评论情绪（按点赞加权，关键词分类）</div>
+        ${catBars}
+        <table><thead><tr><th>赞</th><th>回复</th><th>最高赞评论</th><th>类型</th></tr></thead>
+        <tbody>${topRows || '<tr><td colspan="4" class="muted">无评论样本</td></tr>'}</tbody></table>`
+        : '<p class="muted">本次未取到评论数据（可能预算用尽或上游无公开评论）。</p>'}
+      ${insightBox(ins['6'])}
+    </section>
+    <section class="rpt-sec">
+      ${secHead('八', 'AI 十维拆解')}
+      <div class="radarbox">${radarSVG(dims)}</div>
+      <table><thead><tr><th>维度</th><th>分数</th><th>发现</th><th>为什么有效</th><th>怎么复用</th></tr></thead>
+      <tbody>${dimRows}</tbody></table>
+      <div class="rpt-sub"><b>可改进</b><ol>${bullets(ai.weaknesses)}</ol></div>
+      <div class="rpt-sub"><b>同公式新选题</b><ol>${bullets(ai.next_ideas)}</ol></div>
+    </section>
+    <div class="rpt-foot">数据源 ${esc(r.source_provider || '—')} · 分析引擎 ${esc(ai.model || r.engine || '—')} · 按配置不生成第五章「画面与剪辑」与第七章「与博主最近作品对比」</div>
+  </div>`;
+}
+function reportDetail(r) {
+  if (hasDeep(r)) {
+    try { return renderDeepReport(r, JSON.parse(r.report_json)); }
+    catch (e) { return `<div class="kv"><span class="k">解析失败</span><span>${esc(e.message)}</span></div>`; }
+  }
+  return `<div class="kv">
+    <span class="k">可复用模式</span><span>${esc(r.reusable_pattern)}</span>
+    <span class="k">内容结构</span><span>${esc(parseField(r.structure))}</span>
+    <span class="k">受众痛点</span><span>${esc(parseField(r.pain_points))}</span>
+    <span class="k">高频提问</span><span>${esc(parseField(r.top_comments))}</span>
+    <span class="k">政策引用</span><span>${esc(parseField(r.policy_refs))}</span>
+    <span class="k">合规风险</span><span>${esc(r.risk_notes)}</span>
+    <span class="k">总结</span><span>${esc(r.summary)}</span>
+  </div>`;
+}
+
 async function loadReports() {
   const list = await api('/api/reports');
   $('nReports').textContent = list.length + ' 份报告';
   $('reportList').innerHTML = list.length ? list.map(r => `
     <div class="item"><div class="body">
       <div class="t">${esc(r.title || '未命名报告')}</div>
-      <div class="d">${esc(r.topic||'其他')} · ${esc(r.city||'—')} · ${esc(r.hook_type||'—')} · ${esc(r.engine)} 引擎${r.likes ? ' · ' + r.likes + ' 赞' : ''}${r.author ? ' · ' + esc(r.author) : ''}${r.harvest_job_id ? ' · 采集 #' + r.harvest_job_id : ''}</div>
-      <div class="detail ${CUR.reportOpen[r.id] ? '' : 'hidden'}" id="rd_${r.id}">
-        <div class="kv">
-          <span class="k">可复用模式</span><span>${esc(r.reusable_pattern)}</span>
-          <span class="k">内容结构</span><span>${esc(parseField(r.structure))}</span>
-          <span class="k">受众痛点</span><span>${esc(parseField(r.pain_points))}</span>
-          <span class="k">高频提问</span><span>${esc(parseField(r.top_comments))}</span>
-          <span class="k">政策引用</span><span>${esc(parseField(r.policy_refs))}</span>
-          <span class="k">合规风险</span><span>${esc(r.risk_notes)}</span>
-          <span class="k">总结</span><span>${esc(r.summary)}</span>
-        </div>
+      <div class="d">${esc(r.topic||'其他')} · ${esc(r.city||'—')} · ${esc(r.hook_type||'—')} · ${r.engine==='llm'?'AI 十维':(r.engine==='manual'?'手工':'规则')} 引擎${r.likes ? ' · ' + r.likes + ' 赞' : ''}${r.author ? ' · ' + esc(r.author) : ''}${r.harvest_job_id ? ' · 采集 #' + r.harvest_job_id : ''}</div>
+      <div class="detail ${hasDeep(r) ? 'deep' : ''} ${CUR.reportOpen[r.id] ? '' : 'hidden'}" id="rd_${r.id}">
+        ${reportDetail(r)}
       </div>
     </div><div class="acts">
-      <span class="pill ${r.engine==='llm'?'ok':''}">${r.engine==='llm'?'AI 分析':(r.engine==='manual'?'手工':'内置')}</span>
+      <span class="pill ${r.engine==='llm'?'ok':''}">${r.engine==='llm'?'AI 十维':(r.engine==='manual'?'手工':'内置')}</span>
       ${r.source_provider ? `<span class="pill ${r.source_provider.indexOf('tikhub')>=0?'ok':'blue'}">${esc(srcLabel(r.source_provider))}</span>` : ''}
       <button class="btn" onclick="toggleReport(${r.id})">详情</button>
       <button class="btn" onclick="delReport(${r.id})">删</button>
@@ -242,16 +428,63 @@ function pollHarvest(id) {
     } catch (e) { clearInterval(HPOLL); $('btnHarvest').disabled = false; }
   }, 1200);
 }
+/* ---------- 采集任务历史：默认 3 条，其余靠下拉 / 展开 ---------- */
+let HV = {list: [], limit: 3};
 async function loadHarvestJobs() {
-  const list = await api('/api/harvest');
-  $('harvestList').innerHTML = list.length ? list.map(j => `
+  const list = await api('/api/harvest?limit=5000');
+  HV.list = Array.isArray(list) ? list : [];
+  const sel = $('hvLimit');
+  if (sel) HV.limit = parseInt(sel.value, 10);
+  if (!Number.isFinite(HV.limit) || HV.limit < 0) HV.limit = 3;
+  renderHarvestJobs();
+}
+function renderHarvestJobs() {
+  const all = HV.list;
+  const shown = HV.limit === 0 ? all : all.slice(0, HV.limit);
+  $('harvestList').innerHTML = shown.length ? shown.map(j => `
     <div class="item"><div class="body">
       <div class="t">任务 #${j.id} · ${esc((j.input_text || '').slice(0, 40))}</div>
       <div class="d">${esc(j.provider)} · 候选 ${j.found} / 入库 ${j.imported} / 调用 ${j.cost_calls} · ${esc(j.created_at)}</div>
     </div><div class="acts">
-      <span class="pill ${j.status==='done'?'ok':(j.status==='failed'?'warn':'blue')}">${j.status}</span>
-      <button class="btn" onclick="watchHarvest(${j.id})">看日志</button>
+      <span class="pill ${j.status==='done'?'ok':(j.status==='failed'?'warn':'blue')}">${esc(j.status)}</span>
+      <button class="btn mini" onclick="watchHarvest(${j.id})">看日志</button>
+      <button class="btn mini danger" onclick="deleteHarvestJob(${j.id})">删除</button>
     </div></div>`).join('') : '<div class="empty">还没有采集任务。在上面输入一段文字即可开始。</div>';
+  const tip = $('hvCountTip');
+  if (tip) tip.textContent = `共 ${all.length} 条 · 当前显示 ${shown.length} 条`;
+  const more = all.length - shown.length;
+  const box = $('harvestMore');
+  if (box) box.innerHTML = more > 0
+    ? `<button class="btn" onclick="expandHarvest()">▾ 展开其余 ${more} 条</button>`
+    : (all.length > 3 && HV.limit === 0
+        ? `<button class="btn" onclick="collapseHarvest()">▴ 收起，只看最近 3 条</button>` : '');
+}
+function expandHarvest() {
+  const sel = $('hvLimit'); if (sel) sel.value = '0';
+  HV.limit = 0; renderHarvestJobs();
+}
+function collapseHarvest() {
+  const sel = $('hvLimit'); if (sel) sel.value = '3';
+  HV.limit = 3; renderHarvestJobs();
+}
+async function deleteHarvestJob(id) {
+  if (!confirm(`删除采集任务 #${id} 的记录？\n\n只删这条任务记录，已入库的分析报告不受影响。`)) return;
+  try {
+    await api(`/api/harvest/${id}`, {method:'DELETE'});
+    toast(`任务 #${id} 记录已删除`);
+    await loadHarvestJobs();
+  } catch (e) { toast('删除失败：' + e.message); }
+}
+async function clearHarvestJobs() {
+  if (!HV.list.length) return toast('没有可清空的记录');
+  if (!confirm(`清空采集任务历史（共 ${HV.list.length} 条）？\n\n· 只删任务记录，已入库的分析报告 / 文案 / 成片都不受影响\n· 正在运行的任务会保留，等它结束再清`)) return;
+  try {
+    const r = await api('/api/harvest/clear', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({confirm:'CLEAR'})});
+    toast(`已清空 ${r.deleted} 条` + (r.kept ? `，${r.kept} 条运行中已保留` : ''));
+    await loadHarvestJobs();
+  } catch (e) { toast('清空失败：' + e.message); }
 }
 async function watchHarvest(id) {
   const j = await api(`/api/harvest/${id}`);
@@ -260,23 +493,120 @@ async function watchHarvest(id) {
 }
 
 /* ---------- 3 文案 ---------- */
+
+/* 政策文件上传 → 要点卡（方案 v4：内容主体源，先过目再生成） */
+bindUpload('filePolicy', 'dropPolicy', async f => {
+  const box = $('policyBox');
+  box.textContent = '上传中，正在提取文本和要点卡…';
+  const fd = new FormData(); fd.append('file', f);
+  try {
+    const r = await api('/api/policy/extract', {method:'POST', body:fd});
+    CUR.policyCard = r.card;
+    renderPolicyCard(r);
+    toast('要点卡已提取，请核对数字后再生成');
+  } catch (e) {
+    CUR.policyCard = null; box.innerHTML = '';
+    toast('政策解析失败：' + e.message);
+  }
+});
+function renderPolicyCard(r) {
+  const c = r.card || {};
+  const row = (k, v) => v ? `<div class="kvrow"><span class="k">${k}</span><span>${esc(v)}</span></div>` : '';
+  const list = (k, arr) => (arr && arr.length)
+    ? `<div class="kvrow"><span class="k">${k}</span><span>${arr.map(x => esc(x)).join('<br>')}</span></div>` : '';
+  $('policyBox').innerHTML = `<div class="policycard">
+    <div class="pchead"><b>📄 ${esc(c.policy_name || '政策要点卡')}</b>
+      <button class="btn mini danger" onclick="removePolicy()">移除</button></div>
+    ${row('文号', c.doc_number)}${row('生效', c.effective_date)}${row('截止', c.deadline)}
+    ${row('适用对象', c.targets)}${list('核心条款', c.core_clauses)}${list('数字/补贴', c.amounts)}
+    ${list('条件', c.conditions)}${list('官方术语', c.official_terms)}
+    <div class="pcnote">共 ${r.length} 字原文 · 生成时数字/条件/日期只采用以上内容，请先核对</div>
+  </div>`;
+}
+function removePolicy() {
+  CUR.policyCard = null; $('policyBox').innerHTML = '';
+  $('filePolicy').value = '';
+  toast('已移除政策文件');
+}
+
+/* 分段节奏 + 素材提示 + 查重渲染（文案 v2） */
+function parseJSON(v, fb) {
+  try { const x = JSON.parse(v); return x; } catch (e) { return fb; }
+}
+function renderScriptView(r) {
+  // r.segments 可能是数组（生成接口）或 JSON 字符串（scripts 表）
+  const segs = parseJSON(r.segments, Array.isArray(r.segments) ? r.segments : []) || [];
+  const orig = parseJSON(r.originality, r.originality && typeof r.originality === 'object'
+    ? r.originality : {}) || {};
+  const scStats = $('scStats');
+  if (!segs.length) {
+    $('segView').innerHTML = ''; scStats.innerHTML = ''; $('cueBox').innerHTML = '';
+    $('btnCopyCues').disabled = true;
+  } else {
+    const total = (segs.reduce((a, s) => a + (Number(s.secs) || 0), 0)).toFixed(1);
+    const chars = segs.reduce((a, s) => a + (s.text || '').length, 0);
+    const tgt = Number(r.target_secs) || 0;
+    scStats.innerHTML = `<span>共 ${segs.length} 段</span><span>${chars} 字</span>` +
+      `<span>预计口播 <b>${total}s</b></span>` +
+      (tgt ? `<span>目标 ${tgt}s · 偏差 ${(Math.abs(total - tgt) / tgt * 100).toFixed(0)}%</span>` : '') +
+      (r.engine === 'rule' ? '<span class="warnpill">兜底模式（模板稿）</span>' : '');
+    $('segView').innerHTML = '<label>口播分段 · 节奏与素材提示</label>' + segs.map(s => `
+      <div class="seg">
+        <div class="seghead"><span class="seq">${s.seq}</span>
+          <span class="pace">🎙 ${esc(s.pace || '中')}</span>
+          <span class="secs">${(Number(s.secs) || 0).toFixed(1)}s</span></div>
+        <div class="segtext">${esc(s.text || '')}</div>
+        ${s.cue ? `<div class="cue">🎬 素材：${esc(s.cue)}</div>` : ''}
+      </div>`).join('');
+    const cues = segs.filter(s => s.cue);
+    $('btnCopyCues').disabled = !cues.length;
+    $('cueBox').innerHTML = cues.length
+      ? '<label>素材清单（剪辑用）</label><ol class="cuelist">' +
+        cues.map(s => `<li><b>第 ${s.seq} 段</b> · ${(Number(s.secs)||0).toFixed(1)}s · ${esc(s.cue)}</li>`).join('') + '</ol>'
+      : '';
+  }
+  const ob = $('origBox');
+  if (!orig.checked && orig.rewrites === undefined) {
+    ob.innerHTML = '';
+  } else if (orig.hits && orig.hits.length) {
+    ob.innerHTML = '<div class="hit">⚠ 原创性检查：以下片段与参考原文重叠 ≥8 字，重写后仍命中，发布前请人工改写：<br>' +
+      orig.hits.map(h => `「${esc(h.quote)}」`).join('、') + '</div>';
+  } else if (orig.checked) {
+    ob.innerHTML = `<div class="pass">✓ 原创性检查通过（8 字查重${orig.rewrites ? '，自动重写 ' + orig.rewrites + ' 次' : '，无重叠'}）</div>`;
+  } else if (r.engine === 'llm') {
+    ob.innerHTML = '<div class="pass" style="opacity:.6">参考报告无逐字稿，本次未做 8 字查重</div>';
+  } else { ob.innerHTML = ''; }
+}
+function copyCues() {
+  const segs = parseJSON(CUR.script && CUR.script.segments, []) || [];
+  const cues = segs.filter(s => s.cue);
+  if (!cues.length) return toast('没有素材提示');
+  const txt = '素材清单（剪辑用）\n' + cues.map(s =>
+    `第 ${s.seq} 段 · ${(Number(s.secs)||0).toFixed(1)}s · ${s.cue}`).join('\n');
+  navigator.clipboard.writeText(txt).then(()=>toast('素材清单已复制')).catch(()=>toast('复制失败'));
+}
+
 async function genScript() {
   const req = {
     topic:$('reqTopic').value, city:$('reqCity').value, seconds:+$('reqSeconds').value,
     hook_style:$('reqHook').value, points:$('reqPoints').value, business:$('reqBusiness').value,
-    cta:$('reqCta').value, tone:'平实、像跟成都老板当面聊'
+    cta:$('reqCta').value, tone:'平实、像跟成都老板当面聊',
+    policy_card: CUR.policyCard || null
   };
-  const btn = $('btnGen'); btn.disabled = true; btn.textContent = '生成中…';
+  if (CUR.policyCard && !confirm('将以上传的政策要点卡为内容主体生成文案，数字以要点卡为准，确认无误？')) return;
+  const btn = $('btnGen'); btn.disabled = true; btn.textContent = '生成中…（参考报告多时会稍久）';
   try {
     const r = await api('/api/scripts/generate', {method:'POST', headers:{'Content-Type':'application/json'},
       body:JSON.stringify(req)});
     CUR.scriptId = r.id; CUR.script = r;
     $('scTitle').value = r.title || ''; $('scBody').value = r.body || '';
-    $('scriptMeta').textContent = `#${r.id} · ${r.engine==='llm'?'AI 生成':'内置引擎'} · 引用 ${(JSON.parse(r.source_report_ids||'[]')).length||0} 份报告`;
+    renderScriptView(r);
+    $('scriptMeta').textContent = `#${r.id} · ${r.engine==='llm'?'AI 生成':'内置引擎'} · 引用 ${(parseJSON(r.source_report_ids, [])||[]).length||0} 份报告` +
+      (r.self_check ? ` · ${r.self_check.slice(0,40)}` : '');
     $('keywordsBox').innerHTML = '搜索词：' + (r.keywords||[]).map(k=>`<span>${esc(k)}</span>`).join('');
     $('btnSaveScript').disabled = false; $('btnFinal').disabled = false;
     await checkScript(true); await loadScripts();
-    toast('文案已生成，可以直接改');
+    toast(r.engine === 'llm' ? '文案已生成，可分段照节奏口播' : 'DeepSeek 不可用，已用兜底模板生成');
   } catch (e) { toast('生成失败：' + e.message); }
   finally { btn.disabled = false; btn.textContent = '生成全新文案'; }
 }
@@ -322,8 +652,10 @@ async function openScript(id) {
   const s = await api(`/api/scripts/${id}`);
   CUR.scriptId = id; CUR.script = s;
   $('scTitle').value = s.title || ''; $('scBody').value = s.body || '';
+  renderScriptView(s);
   $('btnSaveScript').disabled = false; $('btnFinal').disabled = false;
-  $('scriptMeta').textContent = `#${s.id} · ${s.status==='final'?'已定稿':'草稿'}`;
+  const req = parseJSON(s.requirement, {}) || {};
+  $('scriptMeta').textContent = `#${s.id} · ${s.status==='final'?'已定稿':'草稿'} · ${s.engine==='llm'?'AI 生成':'内置引擎'}`;
   await checkScript(true); gotoStep('s3'); window.scrollTo({top:0,behavior:'smooth'});
 }
 async function delScript(id) {
@@ -451,6 +783,9 @@ async function loadSettings() {
   $('setTikhubKey').value = '';
   $('setTikhubKey').placeholder = tk.api_key ? '已保存（' + tk.api_key + '），留空不修改' : 'Bearer Token';
   $('setMaxCalls').value = hv.max_calls || 60;
+  $('setCommentPages').value = hv.comment_pages || 3;
+  $('setUseAsr').value = String(!!hv.use_asr);
+  $('setWhisperModel').value = hv.whisper_model || 'small';
   await loadSeeds();
   $('tplEditor').innerHTML = STATE.templates.map((t,i)=>`
     <div class="tplrow"><b>${esc(t.name)}</b>
@@ -479,7 +814,10 @@ async function saveSettings() {
     auth:{enabled:authOn, username:$('setAuthUser').value.trim() || 'boss'},
     search:{provider:$('setProvider').value,
             tikhub:{base_url:$('setTikhubUrl').value.trim()}},
-    harvest:{max_calls:+$('setMaxCalls').value || 60}
+    harvest:{max_calls:+$('setMaxCalls').value || 60,
+             comment_pages:+$('setCommentPages').value || 3,
+             use_asr:$('setUseAsr').value === 'true',
+             whisper_model:$('setWhisperModel').value}
   };
   if ($('setLlmKey').value) data.llm.api_key = $('setLlmKey').value;
   if ($('setAsrKey').value) data.asr.api_key = $('setAsrKey').value;
@@ -520,6 +858,25 @@ async function testProvider() {
       '｜返回 ' + r.items + ' 条｜消耗 ' + r.cost_calls + ' 次调用' +
       (sample ? '\n样例：' + sample : '');
     await loadProviders();
+  } catch (e) {
+    box.textContent = '✗ 测试失败：' + e.message;
+  } finally { btn.disabled = false; }
+}
+
+async function testLLM() {
+  const btn = $('btnTestLlm'), box = $('llmTestMsg');
+  btn.disabled = true;
+  box.textContent = '正在保存设置并发起 1 次测试调用…';
+  try {
+    if (!await saveSettings()) { box.textContent = '设置保存失败，无法测试'; return; }
+    const r = await api('/api/llm/test', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({})
+    });
+    box.textContent = r.ok
+      ? `✓ ${r.message}｜模型 ${r.model}｜回复 ${r.reply || 'OK'}`
+      : `✗ ${r.message}｜模型 ${r.model || '—'}\n${r.error || ''}\n` +
+        '若提示模型不存在，把上面「模型名」改成上游实际支持的名称即可，其余代码不用动。';
   } catch (e) {
     box.textContent = '✗ 测试失败：' + e.message;
   } finally { btn.disabled = false; }

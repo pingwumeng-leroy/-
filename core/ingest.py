@@ -136,6 +136,38 @@ def _to_netscape_cookie(raw):
     return "\n".join(lines) + "\n"
 
 
+def download_play_url(url, dest, timeout=60, max_bytes=120 * 1024 * 1024):
+    """下载 TikHub 搜索结果里的 play_url（视频播放地址）到 dest。
+
+    这是普通 HTTP 下载，不消耗 TikHub API 调用次数；但地址可能防盗链或过期，
+    所以带 Referer / UA、限制体积、检查 Content-Type，失败交给调用方回落轻量档。
+    """
+    import requests
+    headers = {
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/124.0 Safari/537.36"),
+        "Referer": "https://www.douyin.com/",
+    }
+    total = 0
+    with requests.get(url, stream=True, headers=headers, timeout=timeout) as resp:
+        resp.raise_for_status()
+        ctype = (resp.headers.get("Content-Type") or "").lower()
+        if "text/html" in ctype:
+            raise RuntimeError("play_url 返回网页而非视频，疑似防盗链或地址过期")
+        with open(dest, "wb") as fh:
+            for chunk in resp.iter_content(65536):
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > max_bytes:
+                    raise RuntimeError("视频超过 %d MB 上限" % (max_bytes // 1048576))
+                fh.write(chunk)
+    if total < 10000:
+        raise RuntimeError("下载内容过小（%d 字节），疑似被拦截" % total)
+    return dest
+
+
 def parse_srt(text):
     """从 srt/vtt 文本里抽出纯文本行。"""
     lines, out = text.replace("\r", "").split("\n"), []

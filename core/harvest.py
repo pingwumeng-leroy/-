@@ -8,11 +8,14 @@
 3. 报告只落 reports 表，下游 generate.py 的召回逻辑零改动。
 """
 import json
+import os
 import re
+import shutil
+import tempfile
 import threading
 import traceback
 
-from . import analyze, config, db, llm, providers
+from . import analyze, config, db, ingest, llm, providers, transcript
 
 BUSINESS_TERMS = [name for name, _ in analyze.TOPIC_RULES]
 CITY_HINTS = ["成都", "四川", "高新区", "天府新区"]
@@ -68,15 +71,18 @@ def _percentile_threshold(items, count):
     return vals[int(len(vals) * 0.25)]
 
 
-def _build_transcript(item, comments):
-    """轻量档：用视频文案 + 公开评论构造可分析文本。
+def _build_transcript(item, comments, tr=None):
+    """有逐字稿用逐字稿，否则用视频文案 + 前 5 条评论构造可分析文本。
 
-    完整档（下载视频 → 音轨 → dtk 离线 FunASR → 口播逐字稿）由
-    settings.harvest.use_asr 预留开关，接上 dtk 后在此处替换文本来源。
+    逐字稿由 settings.harvest.use_asr 开启：play_url 下载 → ffmpeg 抽音频 →
+    本地 faster-whisper 转写（core.transcript），失败自动回落轻量档。
     """
-    parts = [item.get("desc") or item.get("title") or ""]
+    if tr and tr.get("full"):
+        parts = [str(tr["full"])[:3000]]
+    else:
+        parts = [item.get("desc") or item.get("title") or ""]
     if comments:
-        parts.append("评论区常问：" + "；".join(c["text"] for c in comments[:5]))
+        parts.append("评论区常问：" + "；".join((c.get("text") or "") for c in comments[:5]))
     return "\n".join(p for p in parts if p).strip()
 
 
@@ -96,12 +102,18 @@ def run_harvest(jid):
     publish_days = int(_pd) if _pd is not None else 180
     max_calls = int(params.get("max_calls") or 60)
     pages = int(params.get("pages_per_keyword") or 2)
+    hv = config.get_settings().get("harvest", {})
+    comment_pages = int(params.get("comment_pages") or hv.get("comment_pages", 3))
     use_fallback = bool(params.get("use_seed_fallback", True))
+    use_asr = bool(params.get("use_asr", hv.get("use_asr", False)))
+    whisper_model = str(params.get("whisper_model") or hv.get("whisper_model") or "small")
 
     provider = providers.get_provider(job.get("provider"))
     fallback = providers.MockProvider()
     lines = ["数据源：" + provider.label]
-    db.update_harvest_job(jid, status="running", progress=2, log=lines[0])
+    if use_asr:
+        lines.append("完整档：启用逐字稿（本地 faster-whisper / %s）" % whisper_model)
+    db.update_harvest_job(jid, status="running", progress=2, log="\n".join(lines))
 
     try:
         kws = expand_keywords(job.get("input_text") or "")
@@ -181,28 +193,80 @@ def run_harvest(jid):
 
         imported, errors = 0, 0
         for i, item in enumerate(target):
-            if db.get_harvest_job(jid).get("status") == "stopped":
+            # 任务记录可能已被「清空历史」删掉，用空字典兜底避免 None.get()
+            if (db.get_harvest_job(jid) or {}).get("status") == "stopped":
                 _log(jid, 100, lines, "任务被手动停止，已入库报告保留")
                 break
             try:
-                try:
-                    cres = provider.comments(item["aweme_id"])
-                    comments = cres.get("items", [])
-                except providers.ProviderError:
-                    comments = fallback.comments(item["aweme_id"]).get("items", [])
+                # 评论翻页同样计费：每页一次调用，必须受 max_calls 预算约束
+                budget_left = max(0, max_calls - cost_calls)
+                cpages = min(comment_pages, budget_left)
+                if cpages <= 0:
+                    comments = []
+                    _log(jid, 50, lines, "调用预算已用完，跳过评论采集")
+                else:
+                    try:
+                        cres = provider.comments(item["aweme_id"], max_pages=cpages)
+                        comments = cres.get("items", [])
+                        cost_calls += cres.get("cost_calls", 0)
+                    except providers.ProviderError:
+                        comments = fallback.comments(item["aweme_id"]).get("items", [])
+                # 完整档：只对本次要入库的视频下载 + 本地转写。
+                # 视频/音频/SRT 全放临时目录，用完即删，只把文字带进报告。
+                tr = None
+                if use_asr:
+                    play_url = item.get("play_url") or ""
+                    if not play_url:
+                        _log(jid, 50, lines, "无 play_url，跳过逐字稿（回落轻量档）")
+                    else:
+                        tmpdir = tempfile.mkdtemp(prefix="ds_asr_", dir=config.DATA)
+                        try:
+                            vp = os.path.join(tmpdir, "video.mp4")
+                            ingest.download_play_url(play_url, vp)
+                            srt = transcript.transcribe_video(vp, tmpdir, whisper_model)
+                            tr = transcript.load_transcript(srt)
+                            if tr and tr.get("full"):
+                                _log(jid, 50, lines, "逐字稿 %d 字 / %d 段（本地转写）" %
+                                     (len(tr["full"]), len(tr["segments"])))
+                                # DeepSeek 上下文纠错：只改错别字，不改时间戳结构
+                                tr, nfix, why = transcript.correct_transcript(tr)
+                                tr["correct_note"] = why
+                                if nfix:
+                                    _log(jid, 50, lines, "逐字稿纠错：%s" % why)
+                                else:
+                                    _log(jid, 50, lines, "逐字稿纠错未生效：%s" % why)
+                            else:
+                                tr = None
+                                _log(jid, 50, lines, "逐字稿为空，回落轻量档")
+                        except Exception as exc:
+                            tr = None
+                            _log(jid, 50, lines,
+                                 "逐字稿生成失败，回落轻量档：%s" % str(exc)[:100])
+                        finally:
+                            shutil.rmtree(tmpdir, ignore_errors=True)
+
                 # 用 .get() 取字段：第三方 provider 或手工导入的 item 可能缺列，
                 # 不应因为一个可选字段让整条视频的分析全部失败。
                 title = item.get("title") or item.get("desc") or "未命名视频"
                 likes = item.get("digg_count") or 0
-                transcript = _build_transcript(item, comments)
-                report = analyze.rule_analyze(title, transcript, meta={
-                    "likes": likes, "author": item.get("author") or "",
-                    "publish_time": item.get("publish_time") or 0,
-                })
-                if comments:
+                transcript_text = _build_transcript(item, comments, tr)
+                meta = {"likes": likes, "author": item.get("author") or "",
+                        "publish_time": item.get("publish_time") or 0,
+                        "duration": item.get("duration") or 0}
+                engine = "rule"
+                if llm.available():
+                    try:
+                        report = analyze.deep_analyze(item, comments, tr)
+                        engine = "llm"
+                    except Exception as exc:
+                        _log(jid, 50, lines, "AI 十维分析失败，回落规则引擎：%s" % str(exc)[:100])
+                        report = analyze.rule_analyze(title, transcript_text, meta)
+                else:
+                    report = analyze.rule_analyze(title, transcript_text, meta)
+                if comments and engine != "llm":
                     report["top_comments"] = [c["text"] for c in comments[:5]]
                 src = provider.name + ("(fallback)" if degraded else "")
-                db.add_harvest_report(report, item, jid, src)
+                db.add_harvest_report(report, item, jid, src, engine=engine)
                 imported += 1
             except Exception as exc:
                 errors += 1
@@ -210,8 +274,10 @@ def run_harvest(jid):
                      "第 %d 条分析失败（已跳过）：%s" % (i + 1, str(exc)[:100]))
                 continue
             _log(jid, 50 + int(45 * (i + 1) / max(len(target), 1)), lines,
-                 "已入库 %d/%d：%s（%d 赞）" %
-                 (imported, len(target), title[:26], likes))
+                 "已入库 %d/%d：%s（%d 赞，评论 %d 条，逐字稿 %s，%s）" %
+                 (imported, len(target), title[:26], likes, len(comments),
+                  ("%d 字" % len(tr["full"])) if tr else "无",
+                  "AI 十维" if engine == "llm" else "规则引擎"))
 
         db.update_harvest_job(
             jid, status="done", progress=100, imported=imported,
@@ -235,6 +301,9 @@ def start_harvest(text, params=None):
         # 0 = 时间范围「不限」，保留原值，别被 or 兜底成 180
         "publish_days": int(_pd) if _pd is not None else 180,
         "max_calls": int((params or {}).get("max_calls") or s.get("max_calls", 60)),
+        "comment_pages": int((params or {}).get("comment_pages") or s.get("comment_pages", 3)),
+        "use_asr": bool((params or {}).get("use_asr", s.get("use_asr", False))),
+        "whisper_model": (params or {}).get("whisper_model") or s.get("whisper_model", "small"),
         "pages_per_keyword": int((params or {}).get("pages_per_keyword") or 2),
         "likes_mode": (params or {}).get("likes_mode") or "percentile",
         "use_seed_fallback": bool((params or {}).get("use_seed_fallback", True)),

@@ -95,7 +95,19 @@
     <p class="tip">没有视频素材也能先手工补经验，第 3 步照样能生成文案。</p>
   </div>
   <h3 class="sub">采集任务历史</h3>
+  <div class="listbar">
+    <label for="hvLimit">显示</label>
+    <select id="hvLimit" onchange="loadHarvestJobs()">
+      <option value="3">最近 3 条</option>
+      <option value="10">最近 10 条</option>
+      <option value="0">全部记录</option>
+    </select>
+    <span class="mini" id="hvCountTip"></span>
+    <span class="grow"></span>
+    <button class="btn mini danger" onclick="clearHarvestJobs()">清空记录</button>
+  </div>
   <div class="list" id="harvestList"></div>
+  <div id="harvestMore"></div>
   <h3 class="sub">分析报告 · 经验库</h3>
   <div class="list" id="reportList"></div>
 </section>
@@ -129,23 +141,34 @@
       <input id="reqBusiness" placeholder="例：代理记账年单"/>
       <label>结尾引导</label>
       <input id="reqCta" value="评论区说说你的情况，我帮你判断卡在哪一步"/>
+      <label>政策文件（可选，上传后文案主体内容讲这个政策）</label>
+      <div class="drop small" id="dropPolicy" onclick="document.getElementById('filePolicy').click()">
+        <b>上传政策文件</b><span>PDF / Word / TXT · 生成前先给你过要点卡</span>
+      </div>
+      <input type="file" id="filePolicy" accept=".pdf,.docx,.txt,.md" hidden/>
+      <div id="policyBox" class="tip"></div>
       <button class="btn primary big" onclick="genScript()" id="btnGen">生成全新文案</button>
     </div>
 
     <div class="panel">
       <h3>文案编辑台 <span class="mini" id="scriptMeta"></span></h3>
+      <div id="scStats" class="statsbar"></div>
+      <div id="segView"></div>
       <label>标题（观众第一眼看到）</label>
       <input id="scTitle" placeholder="生成后自动填入"/>
-      <label>口播正文（可直接改，按行分段 = 换气点）</label>
-      <textarea id="scBody" rows="14" placeholder="点左边「生成全新文案」，内容会出现在这里；改完记得保存"></textarea>
+      <label>口播正文（可直接改，按行分段 = 换气点；改动后上方节奏标记对应生成版本）</label>
+      <textarea id="scBody" rows="10" placeholder="点左边「生成全新文案」，内容会出现在这里；改完记得保存"></textarea>
       <div class="row">
         <button class="btn" onclick="saveScript()" id="btnSaveScript" disabled>保存修改</button>
         <button class="btn" onclick="checkScript()">合规检查</button>
         <button class="btn" onclick="copyScript()">复制文案</button>
+        <button class="btn" onclick="copyCues()" id="btnCopyCues" disabled>复制素材清单</button>
         <button class="btn accent" onclick="finalizeScript()" id="btnFinal" disabled>✅ 定稿，去拍摄</button>
       </div>
+      <div id="origBox"></div>
       <div id="sensitiveBox"></div>
       <div id="keywordsBox" class="tip"></div>
+      <div id="cueBox"></div>
     </div>
   </div>
 
@@ -249,11 +272,15 @@
     <label>启用</label>
     <select id="setLlmEnabled"><option value="false">关闭（用内置引擎）</option><option value="true">启用</option></select>
     <label>Base URL（OpenAI 兼容）</label>
-    <input id="setLlmUrl" placeholder="https://api.openai.com/v1"/>
+    <input id="setLlmUrl" placeholder="https://api.deepseek.com"/>
     <label>API Key</label>
     <input id="setLlmKey" type="password" placeholder="sk-…"/>
     <label>模型名</label>
-    <input id="setLlmModel" placeholder="gpt-4o-mini"/>
+    <input id="setLlmModel" placeholder="deepseek-flash"/>
+    <div class="row">
+      <button class="btn" onclick="testLLM()" id="btnTestLlm">测试大模型连接</button>
+    </div>
+    <div id="llmTestMsg" class="tip">先保存设置，再发起 1 次极小的调用，确认模型名是否被上游接受。DeepSeek 的 Base URL 填 <code>https://api.deepseek.com</code>；模型名填你指定的 <code>deepseek-flash</code>。</div>
 
     <h3>语音转写接口（可选）</h3>
     <label>启用</label>
@@ -281,7 +308,21 @@
     <input id="setTikhubKey" type="password" placeholder="Bearer Token"/>
     <label>单次调用预算上限</label>
     <input id="setMaxCalls" type="number" value="60"/>
-    <p class="tip">Key 只存在服务器 <code>config/settings.json</code>，页面不回传明文。切到 TikHub 前需验证邮箱并充值，否则返回 403 / 402；失败会自动降级到演示数据。</p>
+    <label>每条视频评论翻页数</label>
+    <input id="setCommentPages" type="number" value="3" min="1" max="10"/>
+    <label>逐字稿（完整档）</label>
+    <select id="setUseAsr">
+      <option value="false">关闭 · 轻量档（文案 + 评论）</option>
+      <option value="true">开启 · 下载视频并本地转写</option>
+    </select>
+    <label>本地转写模型</label>
+    <select id="setWhisperModel">
+      <option value="tiny">tiny（最快，准确率较低）</option>
+      <option value="base">base</option>
+      <option value="small">small（推荐，与 dy- 一致）</option>
+      <option value="medium">medium（更准，慢 2~3 倍）</option>
+    </select>
+    <p class="tip">Key 只存在服务器 <code>config/settings.json</code>，页面不回传明文。切到 TikHub 前需验证邮箱并充值，否则返回 403 / 402；失败会自动降级到演示数据。评论每页固定 20 条、每翻一页计费一次，与搜索共用「单次调用预算上限」。<b>开启逐字稿</b>后会从 TikHub 的 <code>play_url</code> 下载视频（不额外计费）→ ffmpeg 抽音频 → 本地 faster-whisper 转写带时间戳 SRT，第四章可出前 3 秒原话、语速与信息密度曲线；服务器需先装 <code>faster-whisper</code>（首次约 500MB 模型），下载或转写失败会自动回落轻量档。第五章、第七章仍不生成。</p>
     <div class="row">
       <button class="btn" onclick="testProvider()" id="btnTestProvider">测试数据源连接</button>
     </div>

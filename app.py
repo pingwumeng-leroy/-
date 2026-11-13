@@ -19,6 +19,7 @@ app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024  # 1GB
 
 ALLOWED_VIDEO = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".flv"}
 ALLOWED_TEXT = {".txt", ".srt", ".vtt", ".ass", ".md"}
+ALLOWED_POLICY = {".pdf", ".docx", ".txt", ".md"}
 
 
 @app.before_request
@@ -331,6 +332,30 @@ def api_provider_test():
                "message": "连接正常" if res.get("items") else "连接正常，但该关键词没有返回视频"})
 
 
+@app.route("/api/llm/test", methods=["POST"])
+def api_llm_test():
+    """大模型连通性自检：确认 base_url / api_key / model 真的被上游接受。
+
+    用户指定的模型名未必是官方公开名，上线前用一次极小调用验证，
+    避免整批采集跑完才发现 404 / model not found。读的是已落盘设置。
+    """
+    s = config.get_settings().get("llm", {})
+    if not llm.available():
+        return ok({"ok": False, "error": "未启用，或 API Key / Base URL 未填写"})
+    try:
+        txt = llm.chat([
+            {"role": "system", "content": "只回复 OK 两个字符。"},
+            {"role": "user", "content": "连通性测试"},
+        ], temperature=0.1, max_tokens=16)
+        return ok({"ok": True, "model": s.get("model", ""),
+                   "reply": str(txt or "").strip()[:40],
+                   "message": "模型可用"})
+    except Exception as exc:
+        return ok({"ok": False, "model": s.get("model", ""),
+                   "error": str(exc)[:200],
+                   "message": "调用失败：核对 Base URL、API Key 与模型名"})
+
+
 @app.route("/api/harvest/start", methods=["POST"])
 def api_harvest_start():
     d = request.get_json(force=True, silent=True) or {}
@@ -343,14 +368,35 @@ def api_harvest_start():
 
 @app.route("/api/harvest")
 def api_harvest_list():
-    return ok(db.list_harvest_jobs())
+    # 任务历史会一直累计，默认上限放宽到 1000；前端自己控制显示几条
+    try:
+        lim = int(request.args.get("limit") or 1000)
+    except (TypeError, ValueError):
+        lim = 1000
+    return ok(db.list_harvest_jobs(limit=max(1, min(lim, 5000))))
 
 
-@app.route("/api/harvest/<int:jid>")
+@app.route("/api/harvest/clear", methods=["POST"])
+def api_harvest_clear():
+    """一键清空采集任务历史（只删任务记录，保留已入库报告）。"""
+    d = request.get_json(force=True, silent=True) or {}
+    if d.get("confirm") != "CLEAR":
+        return err("缺少确认参数")
+    deleted, kept = db.clear_harvest_jobs()
+    return ok({"deleted": deleted, "kept": kept})
+
+
+@app.route("/api/harvest/<int:jid>", methods=["GET", "DELETE"])
 def api_harvest_job(jid):
     j = db.get_harvest_job(jid)
     if not j:
         return err("任务不存在", 404)
+    if request.method == "DELETE":
+        # 运行中的任务不删：否则后台线程会继续入库报告，列表却已经干净了
+        if j.get("status") in ("queued", "running"):
+            return err("任务正在运行，请先停止任务再删除")
+        db.delete_harvest_job(jid)
+        return ok({"deleted": jid})
     return ok(j)
 
 
@@ -393,6 +439,35 @@ def api_seed_delete(sid):
 
 
 # ---------------- 3. 文案 ----------------
+@app.route("/api/policy/extract", methods=["POST"])
+def api_policy_extract():
+    """上传政策文件 → 提取文本 → DeepSeek 提取要点卡（老板过目确认后用于文案生成）。"""
+    f = request.files.get("file")
+    if not f or ext_of(f.filename) not in ALLOWED_POLICY:
+        return err("请上传 PDF / Word / TXT 政策文件")
+    if not llm.available():
+        return err("政策要点卡提取需要大模型（DeepSeek）可用，请先在设置里启用")
+    try:
+        path = ingest.save_upload(f, "policy")
+    except Exception as exc:
+        return err(f"文件保存失败：{exc}")
+    try:
+        text = generate.policy_text(path)
+    except Exception:
+        text = ""
+    text = (text or "").strip()
+    if len(text) < 30:
+        # 文本层提取不到（扫描件 PDF 等），提示换可复制文字的版本
+        return err("没读到文字内容（可能是扫描图片型 PDF）。请换官方可复制文字的版本，"
+                   "或把政策内容直接粘贴到「必须讲到的要点」里")
+    try:
+        card = generate.extract_policy_card(text)
+    except Exception as exc:
+        return err(f"要点卡提取失败：{exc}")
+    return ok({"filename": f.filename, "length": len(text),
+               "preview": text[:300], "card": card})
+
+
 @app.route("/api/scripts/generate", methods=["POST"])
 def api_script_generate():
     req = request.get_json(force=True, silent=True) or {}
@@ -416,8 +491,14 @@ def api_script(sid):
     if request.method == "PUT":
         d = request.get_json(force=True, silent=True) or {}
         hits = generate.check_sensitive((d.get("title") or "") + (d.get("body") or ""))
-        db.update_script(sid, title=d.get("title", ""), body=d.get("body", ""),
-                         status=d.get("status", "draft"), sensitive_hits=hits)
+        kw = dict(title=d.get("title", ""), body=d.get("body", ""),
+                  status=d.get("status", "draft"), sensitive_hits=hits)
+        # 生成时的分段节奏/查重结果原样保留，除非前端明确传了新值
+        if "segments" in d:
+            kw["segments"] = d.get("segments") or []
+        if "originality" in d:
+            kw["originality"] = d.get("originality") or {}
+        db.update_script(sid, **kw)
         return ok(db.get_script(sid))
     s = db.get_script(sid)
     if not s:

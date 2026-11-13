@@ -59,6 +59,53 @@ def normalize(raw):
     return item
 
 
+def _comment_row(c):
+    """归一化单条评论。
+
+    TikHub 官方 OpenAPI V5.3.2 只定义了评论端点的参数（aweme_id / cursor / count），
+    200 响应只给了通用外壳（code / request_id / message…），没有承诺单条评论的字段。
+    所以字段名一律走「多候选键 + .get()」，缺失降级为 0 / 空串，绝不假设某个键必有。
+    """
+    if not isinstance(c, dict):
+        return None
+    text = str(c.get("text") or c.get("content") or "").strip()
+    if not text:
+        return None
+
+    def _int(*keys):
+        for k in keys:
+            v = c.get(k)
+            if v in (None, ""):
+                continue
+            try:
+                return int(float(v))
+            except (TypeError, ValueError):
+                continue
+        return 0
+
+    ts = _int("create_time")
+    date = ""
+    if ts > 0:
+        try:
+            date = datetime.fromtimestamp(ts / 1000.0 if ts > 1e11 else ts).strftime("%Y-%m-%d")
+        except (ValueError, OSError, OverflowError):
+            date = ""
+    if not date:
+        date = str(c.get("date") or "")[:10]
+    user = c.get("user") or c.get("user_info") or {}
+    if not isinstance(user, dict):
+        user = {}
+    return {
+        "text": text[:500],
+        "digg_count": _int("digg_count", "like_count", "likes"),
+        "replies": _int("reply_comment_total", "reply_count", "replies",
+                        "child_comment_count", "sub_comment_count"),
+        "date": date,
+        "cid": str(c.get("cid") or c.get("comment_id") or ""),
+        "nickname": str(user.get("nickname") or ""),
+    }
+
+
 class SearchProvider:
     name = "base"
     label = "基础接口"
@@ -73,9 +120,11 @@ class SearchProvider:
         """
         raise NotImplementedError
 
-    def comments(self, aweme_id, cursor=0):
-        """可选：返回公开评论文本列表。失败返回空列表，不影响主流程。"""
-        return {"items": [], "cursor": 0, "has_more": False, "cost_calls": 0}
+    def comments(self, aweme_id, cursor=0, max_pages=3):
+        """可选：返回公开评论列表。max_pages 控制翻页深度（每页一次计费调用）。
+        失败返回空列表，不影响主流程。"""
+        return {"items": [], "cursor": 0, "has_more": False,
+                "cost_calls": 0, "provider": self.name}
 
     def health(self):
         return {"ok": True, "provider": self.name}
@@ -186,7 +235,7 @@ class MockProvider(SearchProvider):
         return {"items": page, "cursor": nxt, "has_more": nxt < len(pool),
                 "cost_calls": 1, "provider": self.name}
 
-    def comments(self, aweme_id, cursor=0):
+    def comments(self, aweme_id, cursor=0, max_pages=3):
         idx = 0
         try:
             idx = int(str(aweme_id).replace("MOCK", ""))
@@ -194,7 +243,11 @@ class MockProvider(SearchProvider):
             pass
         topic = _MOCK_SEED[(idx - 1) % len(_MOCK_SEED)][0] if idx else "工商注销"
         texts = _MOCK_COMMENTS.get(topic, ["这个要多久", "需要准备什么材料", "成都能办吗"])
-        return {"items": [{"text": t, "digg_count": 120 - i * 30} for i, t in enumerate(texts)],
+        return {"items": [{"text": t, "digg_count": 120 - i * 30,
+                           "replies": [9, 4, 1][i] if i < 3 else 0,
+                           "date": (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d"),
+                           "cid": "MOCKC%03d" % i, "nickname": ""}
+                          for i, t in enumerate(texts)],
                 "cursor": 0, "has_more": False, "cost_calls": 0, "provider": self.name}
 
 
@@ -341,27 +394,66 @@ class TikHubProvider(SearchProvider):
                                         data.get("backtrace")) or "",
                 "cost_calls": 1, "provider": self.name}
 
-    def comments(self, aweme_id, cursor=0):
-        """评论端点为 GET + query；拿不到就返回空，不拖累主流程。
-
-        早期误按 POST + JSON Body 发出，TikHub 会回 405/422，异常被吞掉后
-        表现为「分析报告里没有评论区内容」。这里按官方 spec 修正。
-        """
-        empty = {"items": [], "cursor": 0, "has_more": False,
-                 "cost_calls": 0, "provider": self.name}
-        try:
-            data = self._request("GET", self.COMMENTS_PATH,
-                                 params={"aweme_id": aweme_id,
-                                         "cursor": int(cursor), "count": 20})
-        except ProviderError:
-            return empty
+    @staticmethod
+    def _comment_rows(data):
+        """评论列表在不同版本可能落在 data.comments / data.data.comments / 顶层。"""
         body = data.get("data") or {}
-        rows = self._pick(body.get("comments"), body.get("comment_list"),
-                          data.get("comments")) or []
-        items = [{"text": c.get("text") or "", "digg_count": c.get("digg_count") or 0}
-                 for c in rows if isinstance(c, dict) and c.get("text")]
-        return {"items": items, "cursor": 0, "has_more": False,
-                "cost_calls": 1, "provider": self.name}
+        inner = body.get("data") if isinstance(body.get("data"), dict) else {}
+        for rows in (body.get("comments"), body.get("comment_list"),
+                     inner.get("comments"), inner.get("comment_list"),
+                     data.get("comments")):
+            if isinstance(rows, list) and rows:
+                return rows
+        return []
+
+    def comments(self, aweme_id, cursor=0, max_pages=3):
+        """按 cursor 翻页取一级评论，默认 3 页 ≈ 60 条。
+
+        官方 spec：评论端点为 GET + query；count 必须保持默认 20，
+        「请保持默认，否则会出现 BUG」；第二页用第一次响应里的 cursor。
+        每页都是一次计费调用，所以页数由 settings.harvest.comment_pages 控制，
+        并受批量任务 max_calls 预算约束。单页失败即返回已取到的部分，不拖累主流程。
+        """
+        page_size = 20
+        pages = max(1, int(max_pages or 1))
+        items, seen, calls = [], set(), 0
+        cur, truncated = int(cursor), False
+        for pi in range(pages):
+            try:
+                data = self._request("GET", self.COMMENTS_PATH,
+                                     params={"aweme_id": aweme_id,
+                                             "cursor": cur, "count": page_size})
+            except ProviderError:
+                break
+            calls += 1
+            rows = self._comment_rows(data)
+            for row in rows:
+                c = _comment_row(row)
+                if not c:
+                    continue
+                key = c["cid"] or c["text"][:60]
+                if key in seen:
+                    continue
+                seen.add(key)
+                items.append(c)
+            body = data.get("data") or {}
+            inner = body.get("data") if isinstance(body.get("data"), dict) else {}
+            raw_next = self._pick(body.get("cursor"), inner.get("cursor"), data.get("cursor"))
+            try:
+                nxt = int(raw_next)
+            except (TypeError, ValueError):
+                nxt = cur + len(rows)
+            hm = self._pick(body.get("has_more"), inner.get("has_more"), data.get("has_more"))
+            if hm is None:
+                hm = len(rows) >= page_size
+            if not rows or not bool(hm) or nxt <= cur:
+                break
+            if pi == pages - 1:
+                truncated = True
+            cur = nxt
+        return {"items": items, "cursor": cur, "has_more": truncated,
+                "cost_calls": calls, "provider": self.name,
+                "note": "官方 spec 未承诺单条评论字段，缺失项已降级为空值"}
 
     def health(self):
         if not self.api_key:

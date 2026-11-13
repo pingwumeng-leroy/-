@@ -261,4 +261,44 @@ sudo rm -f /etc/nginx/sites-enabled/douyin-studio
 
 ## 当前边界
 
-`search.provider` 默认是 `mock`，接真实数据需在设置里填 TikHub API Key 并切换数据源；未配 LLM 时文案由规则引擎生成；`use_asr` 默认关闭（轻量档）。这些都不影响五步流程跑通，属于按预算逐步升级的开关。
+`search.provider` 默认 `mock`；`llm.enabled` 默认 `false`（用内置规则引擎）；`use_asr` 默认关闭（轻量档）。三者都不影响五步流程跑通，属于按预算逐步升级的开关。
+
+## 轻量 AI 十维分析（DeepSeek）
+
+批量采集的报告在配好 LLM 后自动切换成「AI 十维」，网页内点「详情」看完整报告；未配置或调用失败自动回落到规则引擎，报告字段结构完全一致，第 3 步生成文案无需改动。
+
+**配置**：设置 → 大模型接口 → 启用 / Base URL `https://api.deepseek.com` / 填 API Key / 模型名 `deepseek-flash` → 保存 → 点「测试大模型连接」确认模型名被上游接受。模型名不被接受时改成上游实际名称即可，其它代码不动。
+
+**评论区数据边界**（本次核实的结论）：
+
+- 评论端点 `GET /api/v1/douyin/web/fetch_video_comments`，参数 `aweme_id` / `cursor` / `count`；官方明确要求 `count` 保持默认 **20**（原文「请保持默认，否则会出现 BUG」）。
+- 翻页用上一次响应里的 `cursor`，每翻一页计费一次。默认 `harvest.comment_pages = 3`，即每条约 60 条；与搜索共用 `max_calls` 预算，预算用完自动跳过评论采集。
+- **官方 OpenAPI 只定义了参数，没有承诺单条评论的字段**，因此 `core/providers.py::_comment_row()` 对 `text` / `digg_count` / `reply_comment_total` / `create_time` / `cid` 做多键名兜底，缺失降级为空值，不假设必有。
+- 评论回复需另调 `fetch_video_comment_replies`（`item_id` + `comment_id`），轻量档不取；评论者画像不取。
+
+**报告章节**（按确认结果）：一句话结论 / 关键爆款因素 / 一互动数据结构 / 二时长策略 / 三标题与话题 / 四开头钩子与讲述节奏 / 六评论区 / 八 AI 十维拆解。**第五章「画面与剪辑」、第七章「与博主最近作品对比」不生成**。第四章在轻量档标注「无逐字稿」；开启 `use_asr` 后改为展示真实前 3 秒 / 15 秒原话、语速与信息密度曲线（见下节）。
+
+**防幻觉**：所有量化数字（互动三率、时长、标题特征、评论加权情绪、@ 占比、时间跨度，以及有稿时的语速与密度曲线）由本地规则层计算；提示词逐条禁止模型编造镜头切换、播放量、完播率、博主近期中位数与具体政策条款。轻量档额外禁止编造前 3 秒原话与语速；有逐字稿时反过来要求**逐字引用给定原话，不得改写或补写**。完整报告 JSON 存在 `reports.report_json` 的 `facts` / `ai_analysis` 两个节点，**表结构未改**。
+
+**新增接口**：`POST /api/llm/test`（模型连通性自检）。设置项新增「每条视频评论翻页数」「逐字稿（完整档）」「本地转写模型」。
+
+## 完整档：本地逐字稿（faster-whisper）
+
+做法移植自 `dy-/analyze_douyin.py`：`transcribe_with_whisper()` → `load_transcript()` → `analyze_transcript()`。逐字稿必须是**带时间戳的 SRT**，纯文本算不出前 3 秒原话 / 语速 / 信息密度曲线。
+
+**开启**：设置 → 数据源 · 批量采集报告 → 「逐字稿（完整档）」选开启 → 选模型（`small` 与 dy- 一致）→ 保存。服务器先装依赖：
+
+```bash
+cd /opt/douyin-studio && sudo .venv/bin/pip install faster-whisper
+sudo systemctl restart douyin-studio
+```
+
+首次运行会自动下载模型（约 500MB）。国内服务器默认走 `HF_ENDPOINT=https://hf-mirror.com`，模型缓存放在 `data/hf_cache`（已 gitignore），两者都可用环境变量覆盖，不需要改 systemd。
+
+**链路**：`harvest.use_asr=true` 时，对本次要入库的每条视频 → `TikHub play_url` 下载（普通 HTTP，不消耗 TikHub 调用次数）→ `ffmpeg` 抽 16k 单声道音频 → 本地 `faster-whisper`（`int8` / `vad_filter` / 简体中文引导词）→ 带时间戳 `transcript.srt` → `core/transcript.py` 本地算指标 → 与 `facts` 一起喂 DeepSeek。视频、音频、SRT 全放临时目录，**用完即删**，只有逐字稿文本进入 `reports.report_json`。
+
+**模型按规格缓存在进程内**，批量 5 条只加载一次；44 秒视频 `small/int8` 约 20–60 秒，5 条约 2–5 分钟，任务日志会打印逐字稿字数。
+
+**失败自动回落**：没装 `faster-whisper`、`play_url` 防盗链 / 过期、下载返回网页、转写为空或异常，任一情况都只让这一条退回轻量档并写日志，**不中断整批任务**，其余报告照常入库。建议首次启用只采 1 条验证 `play_url` 可用性。
+
+**仍不生成**：第五章画面 / 关键帧 / 镜头切换、第七章博主作品对比、播放量与完播率（TikHub 不提供）。DeepSeek 没有 `/audio/transcriptions`，所以转写不走 `settings.asr` 那套云端接口。
