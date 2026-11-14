@@ -546,37 +546,45 @@ def _sentences(text, maxn=14):
     return out[:maxn] or [text.strip()[:40]]
 
 
-def _split_for_pace(sents, target):
+def _split_for_pace(sents, target, extra_shots=2):
     """句子太少、镜头数撑不满配音时长时，把长句按逗号拆成独立镜头。
 
-    poster-kit 每个控件都有最短时长，硬拉长单个镜头会变成“一屏停尸”，
-    正确做法是多铺几屏：一句 20 字的话拆成两屏，节奏立刻回来。
+    模板对每个控件同时卡下限和上限（opener 2–3.5s、tip 3–5s、outro 4–6s…），
+    镜头数不够时只能把单屏拉长，必然撞上限报“opener 时长需为 2–3.5 秒”。
+    正确解法是多铺几屏：一句 20 字的话拆成两屏，节奏和时长都合理。
+
+    extra_shots 是文案之外的固定镜头（片头 opener + 片尾 outro）。
     """
-    if target <= 0 or len(sents) >= 10:
+    if target <= 0 or not sents:
         return sents
+    NAVG = 4.2      # 常规内容屏的目标时长
+    MAXN = 30       # 兜底，避免病态输入把句子切得过碎
     out = list(sents)
+    # 需要多少内容屏 ≈ (配音时长 - 固定屏时长) / 每屏目标时长
+    need = int(round(max(1.0, (target - extra_shots * 4.0) / NAVG)))
+    need = min(need, MAXN)
     guard = 0
-    while guard < 12:
+    while len(out) < need and guard < 4 * MAXN:
         guard += 1
-        if len(out) >= 10:
+        # 每次拆最长的那句：按逗号对半切，切不动就找次长的
+        order = sorted(range(len(out)), key=lambda i: -len(out[i]))
+        done = False
+        for idx in order:
+            long = out[idx]
+            clause = [x.strip() for x in re.split(r"[，,、]", long.rstrip("。！？!?"))
+                      if x.strip()]
+            if len(clause) < 2:
+                continue
+            mid = max(1, len(clause) // 2)
+            a = "，".join(clause[:mid]) + "。"
+            b = "，".join(clause[mid:]) + "。"
+            if len(a) < 4 or len(b) < 4:
+                continue
+            out[idx:idx + 1] = [a, b]
+            done = True
             break
-        # 估算：模板每屏最少停 2.6s 左右（opener/cta 2，steps/myth 3.5），
-        # 片头片尾固定占 6s，所以内容屏数 ≈ (配音时长 - 6) / 2.8
-        need = int(round(max(1.0, (target - 6.0) / 2.8))) - len(out)
-        if need <= 0:
+        if not done:
             break
-        idx = max(range(len(out)), key=lambda i: len(out[i]))
-        long = out[idx]
-        clause = [x.strip() for x in re.split(r"[，,]", long.rstrip("。！？!?")) if x.strip()]
-        if len(clause) < 2:
-            break
-        # 对半拆，短的给前面那屏
-        mid = max(1, len(clause) // 2)
-        a = "，".join(clause[:mid]) + "。"
-        b = "，".join(clause[mid:]) + "。"
-        if len(a) < 6 or len(b) < 6:
-            break
-        out[idx:idx + 1] = [a, b]
     return out
 
 
@@ -827,6 +835,22 @@ POSTER_MIN = {
     "prosCons": 4.5, "qa": 3.5,
 }
 POSTER_MIN_DEFAULT = 2.0
+
+# 模板硬性最长时长。spec 只写了 minDur，上限藏在渲染器的 controls/*.js 里，
+# 超了会报“脚本错误：xxx 时长需为 A–B 秒”（实测 opener 上限 3.5s）。
+# 这里按渲染器报错反推常用控件的区间，超过上限时宁可多切一屏，不硬拉长。
+POSTER_MAX = {
+    "opener": 3.5, "title": 4.0, "keyword": 4.0, "kinetic": 4.0, "bigtype": 4.0,
+    "list": 6.0, "steps": 6.0, "iconcards": 6.0, "tip": 5.0, "myth": 5.5,
+    "definition": 6.0, "compare": 6.0, "counter": 5.0, "chapter": 3.0,
+    "cta": 4.0, "outro": 6.0, "highlight": 4.5, "quote": 5.0,
+    "prosCons": 6.0, "qa": 5.5, "number": 5.0,
+}
+POSTER_MAX_DEFAULT = 6.0
+
+
+def poster_max(ctl):
+    return POSTER_MAX.get(ctl, POSTER_MAX_DEFAULT)
 
 
 def _fit_segments(segs, target):
@@ -1220,6 +1244,131 @@ def _extend_srt(path, target):
         open(path, "w", encoding="utf-8").write("\n\n".join(blocks) + "\n")
 
 
+def _expand_for_duration(segs, vdur, log=None):
+    """配音比镜头能承载的时长还长时，把镜头劈开，直到每屏都能落进合法区间。
+
+    只在“总时长明显超出所有镜头上限之和”时才动手，正常片子不受影响。
+    劈开的镜头沿用同一个控件与变体，文案不重复（内容只是多停一屏）。
+    """
+    log = log or (lambda m: None)
+    if not segs or vdur <= 0:
+        return segs
+    cap_sum = sum(poster_max(s["control"]) for s in segs)
+    if vdur <= cap_sum * 0.92:
+        return segs
+    out = [dict(s) for s in segs]
+    guard = 0
+    # 片头片尾只有 1 个，不要劈；优先劈内容屏里最长的
+    while guard < 60:
+        guard += 1
+        cap_sum = sum(poster_max(s["control"]) for s in out)
+        if vdur <= cap_sum * 0.9:
+            break
+        cand = [i for i, s in enumerate(out)
+                if s["control"] not in ("opener", "outro")]
+        if not cand:
+            # 全是片头片尾（内容为空）：在片尾前插入内容屏吸收时长，
+            # 不能让 outro 独自撑满整条片子，否则必撞它的 4–6 秒上限。
+            pos = len(out) - 1 if out and out[-1]["control"] == "outro" else len(out)
+            out.insert(pos, {"control": "tip", "variant": "banner", "t0": 0, "t1": 3.0,
+                             "props": {"kicker": "补充", "kind": "info",
+                                       "title": "补充说明",
+                                       "text": "更多细节可以留言问我"}})
+            continue
+        # 候选优先取“内容屏”，都拆到不能再拆时才动 cta
+        content = [i for i in cand if out[i]["control"] != "cta"]
+        pool = content or cand
+        # 挑当前最长、且还能劈的那个
+        i = max(pool, key=lambda k: out[k]["t1"] - out[k]["t0"])
+        s = out[i]
+        dur = s["t1"] - s["t0"]
+        lo_i = POSTER_MIN.get(s["control"], POSTER_MIN_DEFAULT)
+        hi_i = poster_max(s["control"])
+        if dur <= lo_i + 0.05:
+            # 这屏已经到下限劈不动了：换成“再插一屏同样的内容”，
+            # 总比让单屏停 20 秒撞上限好（语义不重复，只是多停一屏）。
+            out.insert(i + 1, dict(s))
+            continue
+        half = max(lo_i, min(hi_i, dur / 2.0))
+        a = dict(s)
+        b = dict(s)
+        a["t1"] = round(s["t0"] + half, 2)
+        b["t0"] = a["t1"]
+        b["t1"] = s["t1"]
+        b["props"] = dict(s.get("props") or {})
+        out[i:i + 1] = [a, b]
+    # 重新累加时间，保证首尾相接、末段收在 vdur
+    t = 0.0
+    for s in out:
+        dur = s["t1"] - s["t0"]
+        s["t0"] = round(t, 2)
+        t = round(t + dur, 2)
+        s["t1"] = t
+    if out:
+        out[-1]["t1"] = round(vdur, 2)
+    log("文案内容偏少（%d 屏 / %.1fs），已扩展为 %d 屏以匹配配音时长"
+        % (len(segs), vdur, len(out)))
+    return out
+
+
+def _fit_into_bounds(segs, vdur):
+    """把每屏时长收进模板的 [minDur, maxDur] 区间，并保证总长等于 vdur。
+
+    分配结果撞上限时（内容太少、配音太长），把超出的部分拆给同控件的相邻屏，
+    实在分不出去才允许略超——但绝不跌破下限（下限是模板硬门槛）。
+    """
+    if not segs:
+        return segs
+    n = len(segs)
+    lo = [POSTER_MIN.get(s["control"], POSTER_MIN_DEFAULT) for s in segs]
+    hi = [poster_max(s["control"]) for s in segs]
+    durs = [s["t1"] - s["t0"] for s in segs]
+    # 先压到上限之内，把溢出的量攒起来
+    pool = 0.0
+    for i in range(n):
+        if durs[i] > hi[i]:
+            pool += durs[i] - hi[i]
+            durs[i] = hi[i]
+    # 再把自己有空间的屏填回去
+    for _ in range(6):
+        if pool <= 0.01:
+            break
+        room = [max(0.0, hi[i] - durs[i]) for i in range(n)]
+        tot = sum(room)
+        if tot <= 0.01:
+            break
+        give = 0.0
+        for i in range(n):
+            if room[i] <= 0.01:
+                continue
+            g = min(pool * room[i] / tot, room[i])
+            durs[i] += g
+            give += g
+        pool -= give
+        if give <= 0.001:
+            break
+    total = sum(durs)
+    if total < vdur:
+        # 还差一点：按剩余空间补，避免末段出现空档
+        short = vdur - total
+        room = [max(0.0, hi[i] - durs[i]) for i in range(n)]
+        tot = sum(room)
+        if tot > 0.01:
+            for i in range(n):
+                if room[i] > 0.01:
+                    durs[i] += short * room[i] / tot
+        else:
+            durs[-1] += short
+    # 收尾：逐段累加，末段对齐 vdur
+    t = 0.0
+    for i, s in enumerate(segs):
+        s["t0"] = round(t, 2)
+        t = round(t + durs[i], 2)
+        s["t1"] = t
+    segs[-1]["t1"] = round(vdur, 2)
+    return segs
+
+
 def bind_poster_audio(script, opts, timeline, inputs, audio_path, log=None):
     """把配音真正接进竖屏时间轴。
 
@@ -1243,6 +1392,13 @@ def bind_poster_audio(script, opts, timeline, inputs, audio_path, log=None):
              if s.strip()]
     if not sents:
         return timeline
+
+    # 0) 时长与文案严重不匹配时先扩镜头。
+    # 模板每个控件都是“下限…上限”的区间（opener 2–3.5s、tip 3–5s、outro 4–6s），
+    # 镜头数不够时只能把单屏拉长，必然撞上限报“opener 时长需为 2–3.5 秒”。
+    # 这里按剩余时长把最长的镜头“劈开”，让每一屏都落在合法区间里。
+    segs = _expand_for_duration(segs, vdur, log)
+    timeline["segments"] = segs
 
     # 1) 句子级时钟：按字数占比分配音时长
     total_w = sum(max(1, len(s)) for s in sents)
@@ -1272,9 +1428,37 @@ def bind_poster_audio(script, opts, timeline, inputs, audio_path, log=None):
     if vdur < floor:
         # 预算不够：直接按比例给，后续统一收缩到模板下限以内（下文的收尾逻辑）
         log("配音 %.2fs 短于模板最短时长总和 %.2fs，镜头贴着下限排" % (vdur, floor))
-        durs = mins
+        durs = list(mins)
     else:
-        durs = [mins[i] + extra * per_scene[i] / tl_total for i in range(n)]
+        # 带封顶的注水：每段先按下限起步，余量按“该段还差多少到上限”分配，
+        # 顶到上限的段不再吃余量，多出来的匀给没满的段。
+        # 不封顶的话长文案会把 opener 拉到 5 秒以上，被渲染器拒收
+        # （实测报错：opener 时长需为 2–3.5 秒）。
+        caps = [poster_max(s["control"]) for s in segs]
+        durs = list(mins)
+        left = extra
+        for _ in range(4):
+            room = [max(0.0, caps[i] - durs[i]) for i in range(n)]
+            tot_room = sum(room)
+            if left <= 0.01 or tot_room <= 0.01:
+                break
+            # 需求权重：该段应得多少，但不能超过剩余空间
+            wsum = sum(per_scene[i] for i in range(n) if room[i] > 0.01) or 1.0
+            give = 0.0
+            for i in range(n):
+                if room[i] <= 0.01:
+                    continue
+                d = left * per_scene[i] / wsum
+                d = min(d, room[i])
+                durs[i] += d
+                give += d
+            left -= give
+            if give <= 0.001:
+                break
+        if left > 0.01:
+            # 所有段都顶到上限还有余量：只能继续均摊（模板要求总时长等于配音）
+            log("⚠ 所有镜头已到模板时长上限，仍有 %.2fs 配音需分摊" % left)
+            durs = [d + left / n for d in durs]
     # 归一化到配音精确时长，杜绝 AUDIO_CLOCK_MISMATCH。
     # 末段向上取到 0.01 秒，其他段向下取，保证每段都不跌破模板下限。
     need = sum(POSTER_MIN.get(s["control"], POSTER_MIN_DEFAULT) for s in segs)
@@ -1304,6 +1488,17 @@ def bind_poster_audio(script, opts, timeline, inputs, audio_path, log=None):
             t = math.floor((t + durs[i]) * 100) / 100.0
             sg["t1"] = round(t, 2)
         segs[-1]["t1"] = round(vdur, 2)
+        # 逐屏收进 [minDur, maxDur]：内容太少时长太长时，某些屏会撞上限，
+        # 渲染器会直接报“opener 时长需为 2–3.5 秒”。
+        over = [s for s in segs
+                if (s["t1"] - s["t0"]) > poster_max(s["control"]) + 0.02]
+        if over:
+            _fit_into_bounds(segs, vdur)
+            left = [s for s in segs
+                    if (s["t1"] - s["t0"]) > poster_max(s["control"]) + 0.02]
+            if left:
+                log("⚠ 仍有 %d 屏超过模板时长上限（内容偏少），建议加长文案"
+                    % len(left))
     timeline["duration"] = round(segs[-1]["t1"], 2)
     # 镜头被下限“撑长”时，配音轨要补等长静音，否则工具判时钟不一致；
     # 音频只加尾部静音，不改语速、不截断人声。
