@@ -67,6 +67,13 @@ def ext_of(name):
 
 @app.errorhandler(Exception)
 def handle(exc):
+    # 404 / 405 这类是正常的“地址不存在”，不该打整段堆栈：
+    # 打出来会淹掉真正的报错，排查时容易误判成服务崩了。
+    from werkzeug.exceptions import HTTPException
+    if isinstance(exc, HTTPException):
+        if exc.code == 404:
+            return err("接口不存在：%s" % getattr(exc, "description", ""), 404)
+        return err(getattr(exc, "description", str(exc)) or "请求有误", exc.code or 500)
     traceback.print_exc()
     return err(exc)
 
