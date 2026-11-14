@@ -2335,14 +2335,22 @@ def build_poster_talk(script, opts, talk_name, caps, vdur, log=None, profile=Non
         # 模板要求 captionIndices 恰好等于「与本镜头重叠的全部字幕」，
         # 切点落在句子中间时这句字幕会同时压两屏，只能二选一 → 必被判错。
         # 所以先把切点吸到句子边界，再按「恰好相交」生成 narrationMap。
-        segs = _shift_to_caption_edges([dict(sg) for sg in timeline["segments"]],
-                                        timeline["captions"], body_end, vdur, log)
-        issues = check_talk_timeline(dict(timeline, segments=segs,
-                                          narrationMap=_narration_rows(segs,
-                                                  timeline["captions"])), vdur)
-        if issues:
-            log("⚠ 切点对齐后时间轴不合规（%s），放弃对齐" % "；".join(issues[:2]))
-            segs = [dict(sg) for sg in timeline["segments"]]
+        raw_segs = [dict(sg) for sg in timeline["segments"]]
+        segs = None
+        # 吸附只在“首屏之外”的切点上做：片头 2.2~3.4s 的上限很紧，
+        # 第一屏跟着句子起点走会直接超限，所以它保持原样。
+        for start in (1, 0):
+            trial_segs = _shift_to_caption_edges(
+                [dict(sg) for sg in raw_segs], timeline["captions"], body_end, vdur,
+                log, start=start)
+            if not check_talk_timeline(dict(timeline, segments=trial_segs,
+                                            narrationMap=_narration_rows(
+                                                trial_segs, timeline["captions"])), vdur):
+                segs = trial_segs
+                break
+        if segs is None:
+            log("⚠ 切点对齐后时间轴不合规，放弃对齐")
+            segs = raw_segs
         timeline["segments"] = segs
         # 字幕和镜头必须是同一套时钟：captionIndices 指的就是这份列表，
         # 而字幕文件也由它生成，否则模板拿 captions.srt 一比对就对不上。
@@ -2741,7 +2749,7 @@ def _narration_rows(shots, caps):
     return rows
 
 
-def _shift_to_caption_edges(shots, caps, body_end, vdur, log=None):
+def _shift_to_caption_edges(shots, caps, body_end, vdur, log=None, start=1):
     """把位于句子中间的镜头切点挪到最近的句子边界（只挪，不改总时长）。
 
     模板 NARRATION_CONTINUITY 要求 captionIndices 恰好等于「与本镜头重叠的
@@ -2767,7 +2775,9 @@ def _shift_to_caption_edges(shots, caps, body_end, vdur, log=None):
     def hi(sg):
         return poster_max(sg["control"])
 
-    for k in range(1, len(shots) - 1):
+    for k in range(max(1, start), len(shots) - 1):
+        if abs(shots[k - 1]["t0"]) < 0.001:
+            continue          # 紧挨片头的那一屏不动，否则会回头把 opener 拉长
         sg = shots[k]
         b = min(bounds, key=lambda x: abs(x - sg["t0"]))
         if abs(b - sg["t0"]) <= 0.011:
