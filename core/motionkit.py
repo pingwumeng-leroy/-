@@ -1334,64 +1334,55 @@ def bind_poster_audio(script, opts, timeline, inputs, audio_path, log=None):
         log("已按配音时钟生成 %d 条字幕" % len(sents))
 
     # 4) narrationMap：镜头与句子的归属
+    #
+    # 模板校验器（NARRATION_ALIGNMENT_REQUIRED）要求每个镜头的 beat 必须
+    # “测量过、按顺序、且落在自己这个镜头的时间区间内”。按句子数量均分是错的：
+    # 12 句分 8 个镜头，第 0 个镜头拿 0~1 句，可第 1 句的实际结束时间可能已经
+    # 越过该镜头的 t1，beat 被截断就算“没有测量”。所以统一按句子中心点归属，
+    # beat 时间用真实配音时间，越界时贴镜头边界但不允许出现空区间。
     rows = []
-    if squeezed:
-        # 单个镜头分不到一句完整配音时，把整句归属给覆盖它绝大部分的那个镜头，
-        # 保证“每句都有归属、不重复”，beat 用镜头自身区间（不虚构词时间）。
-        own = {}
-        i_pos = 0
-        for i in range(len(sents)):
-            best, score = 0, -1.0
-            for k, sg in enumerate(segs):
-                ov = min(ends[i], sg["t1"]) - max(starts[i], sg["t0"])
-                if ov > score:
-                    best, score = k, ov
-            own.setdefault(best, []).append(i)
-        # 记录“第一句还没被处理到哪”，给没有语音的镜头顺延兜底
-        i_pos = len(sents)
+    owner = []
+    for i in range(len(sents)):
+        mid = (starts[i] + ends[i]) / 2.0
+        k_best, dist = 0, 1e9
         for k, sg in enumerate(segs):
-            # 模板要求“每个镜头一行”，没有语音归属的镜头也要给一行（文字收尾）
-            idx = own.get(k, [])
-            if not idx:
-                # 模板规则：只要有音轨，每个镜头就必须写完整原话。
-                # 被压缩时一句会被几个镜头“共用”，共用句按顺序落在各自的
-                # 时间段内，文字不删、语义不丢。
-                if i_pos < len(sents):
-                    idx = [i_pos]
-                else:
-                    idx = [len(sents) - 1]
-            rows.append({
-                "shot": k, "start": sg["t0"], "end": sg["t1"],
-                "spokenText": "".join(sents[i] for i in idx)[:200],
-                "purpose": "neutral-emphasis",
-                "timingSource": "provided-captions",
-                "captionIndices": idx,
-                "beats": [{"at": sg["t0"], "until": sg["t1"],
-                           "spokenText": sents[i][:200], "timing": "sentence",
-                           "target": "props"} for i in idx],
-            })
-    else:
-        for k, sg in enumerate(segs):
-            a = int(k * len(sents) / n)
-            b = max(a + 1, int((k + 1) * len(sents) / n))
-            owned = [i for i in range(a, b) if starts[i] < sg["t1"] - 0.01]
-            if not owned:
-                owned = [min(a, len(sents) - 1)]
-            text = "".join(sents[i] for i in owned)[:200]
-            rows.append({
-                "shot": k,
-                "start": sg["t0"],
-                "end": sg["t1"],
-                "spokenText": text,
-                "purpose": "neutral-emphasis",
-                "timingSource": "provided-captions",
-                "captionIndices": owned,
-                "beats": [{"at": round(max(sg["t0"], starts[i]), 2),
-                           "until": round(min(sg["t1"], ends[i]), 2),
-                           "spokenText": sents[i][:200],
-                           "timing": "sentence",
-                           "target": "props"} for i in owned],
-            })
+            if sg["t0"] - 0.01 <= mid <= sg["t1"] + 0.01:
+                k_best, dist = k, 0.0
+                break
+            d = min(abs(mid - sg["t0"]), abs(mid - sg["t1"]))
+            if d < dist:
+                k_best, dist = k, d
+        owner.append(k_best)
+
+    for k, sg in enumerate(segs):
+        idx = [i for i, o in enumerate(owner) if o == k]
+        if not idx:
+            # 模板要求每个镜头都要有一行；有音轨时还必须带完整原话。
+            # 这个镜头没分到句子，取时间上最近的那句，文字不删。
+            mid_k = (sg["t0"] + sg["t1"]) / 2.0
+            near = min(range(len(sents)),
+                       key=lambda i: abs((starts[i] + ends[i]) / 2.0 - mid_k))
+            idx = [near]
+        beats = []
+        for i in idx:
+            b0 = max(sg["t0"], starts[i])
+            b1 = min(sg["t1"], ends[i])
+            if b1 - b0 < 0.05:
+                b0 = max(sg["t0"], min(starts[i], sg["t1"] - 0.05))
+                b1 = sg["t1"]
+            beats.append({"at": round(b0, 2),
+                          "until": round(max(b1, b0 + 0.05), 2),
+                          "spokenText": sents[i][:200],
+                          "timing": "sentence", "target": "props"})
+        beats.sort(key=lambda b: b["at"])
+        rows.append({
+            "shot": k, "start": sg["t0"], "end": sg["t1"],
+            "spokenText": "".join(sents[i] for i in idx)[:200],
+            "purpose": "neutral-emphasis",
+            "timingSource": "provided-captions",
+            "captionIndices": idx,
+            "beats": beats,
+        })
     timeline["narrationMap"] = rows
     return timeline
 
