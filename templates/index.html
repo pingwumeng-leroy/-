@@ -269,7 +269,18 @@
         </select>
         <label>配乐（可选）</label>
         <input id="motionMusic" placeholder="留空＝无配乐；也可填服务器上的音频文件绝对路径"/>
-        <label>配音音色</label>
+        <label>人声来源</label>
+        <select id="motionTalkMode">
+          <option value="auto" selected>用我第 4 步上传的口播原声（推荐）</option>
+          <option value="tts">不用原声，让模板合成配音</option>
+        </select>
+        <div id="motionTalkHint" class="tip muted">口播原声模式下：成片长度＝你的口播长度，字幕按你的原话对时。</div>
+        <label>字幕时间轴（可选，强烈建议）</label>
+        <label class="filebtn">上传 .srt 字幕
+          <input type="file" id="fileSrt" accept=".srt,.vtt" hidden/>
+        </label>
+        <div id="srtInfo" class="tip muted">不传字幕就靠本地语音识别自动对齐；识别跑不动时只能按字数估算，会有错位。</div>
+        <label>配音音色（上一步选「用原声」时自动忽略）</label>
         <select id="motionVoice">
           <option value="">不配音（模板原声/静音）</option>
           <option value="xiaoxiao" selected>晓晓（女声·自然）</option>

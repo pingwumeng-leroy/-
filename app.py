@@ -247,6 +247,18 @@ def api_video_delete(vid):
 
 
 # ---------------- 2. 内容提取 ----------------
+@app.route("/api/uploads/text", methods=["POST"])
+def api_upload_text():
+    """只存一份字幕/文本文件，返回服务器绝对路径（模板出片当字幕时间轴用）。"""
+    f = request.files.get("file")
+    if not f:
+        return err("没有收到文件")
+    if ext_of(f.filename) not in ALLOWED_TEXT:
+        return err("只支持 %s" % "、".join(sorted(ALLOWED_TEXT)))
+    path = ingest.save_upload(f, "srt")
+    return ok({"path": path, "filename": os.path.basename(path)})
+
+
 @app.route("/api/videos/<int:vid>/transcript", methods=["POST"])
 def api_transcript(vid):
     """支持 multipart（字幕文件）或 json（manual_text / mode）。"""

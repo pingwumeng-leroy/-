@@ -693,9 +693,26 @@ bindUpload('fileTalk','dropTalk', async f => {
     const r = await api('/api/clips/upload', {method:'POST', body:fd});
     CUR.talkPath = r.path;
     $('talkInfo').innerHTML = `✓ 已上传 <b>${esc(r.filename)}</b>，时长 ${r.duration}s，${r.width}×${r.height}。可以点下面按钮去剪辑。`;
+    // 口播视频换了，之前配的字幕就对不上了
+    CUR.srtPath = null; $('srtInfo').textContent = '口播原片已更新，请重新上传对应的 .srt（或留空靠语音识别）。';
+    if ($('motionTalkMode')) $('motionTalkMode').value = 'auto';
     toast('口播视频已上传');
   } catch (e) { $('talkInfo').textContent = '上传失败：' + e.message; toast('上传失败：'+e.message); }
 });
+
+if ($('fileSrt')) {
+  $('fileSrt').onchange = async () => {
+    const f = $('fileSrt').files[0]; $('fileSrt').value = '';
+    if (!f) return;
+    const fd = new FormData(); fd.append('file', f);
+    $('srtInfo').textContent = '上传中…';
+    try {
+      const r = await api('/api/uploads/text', {method:'POST', body:fd});
+      CUR.srtPath = r.path;
+      $('srtInfo').innerHTML = `✓ 已上传 <b>${esc(r.filename)}</b>，模板出片会用它当字幕时间轴。`;
+    } catch (e) { $('srtInfo').textContent = '上传失败：' + e.message; }
+  };
+}
 
 /* ---------- 5 剪辑（三种模式：口播 / 无原片TTS / MotionGit模板） ---------- */
 function skipShoot() { toast('已跳过拍摄，直接去剪辑出片'); gotoStep('s5'); }
@@ -706,7 +723,7 @@ function setRenderMode(mode) {
   $('modeTalk').classList.toggle('hidden', mode !== 'talk');
   $('modeTts').classList.toggle('hidden', mode !== 'tts');
   $('modeMotion').classList.toggle('hidden', mode !== 'motion');
-  if (mode === 'motion') { loadMotionPackages(); syncVoiceSelects(); }
+  if (mode === 'motion') { loadMotionPackages(); syncVoiceSelects(); syncTalkModeUI(); }
   if (mode === 'tts') syncVoiceSelects();
 }
 
@@ -741,11 +758,20 @@ async function startRender() {
     if (!pkg) return toast('请先上传并选择一个 .motion 模板包');
     const selected = [...document.querySelectorAll('#motionScenes input:checked')].map(c => c.value);
     const mv = $('motionVoice').value;
+    const talkMode = $('motionTalkMode').value;
     const opts = {selected, layout:$('motionLayout').value,
                   music_path:$('motionMusic').value.trim()};
-    if (mv) { opts.voice = mv; opts.mg_voice = mv; opts.voice_provider = STATE.motiongit ? 'motiongit' : 'edge'; }
+    // 用原声时不能把 TTS 音色传下去，否则又被合成配音盖掉
+    if (talkMode === 'tts' && mv) {
+      opts.voice = mv; opts.mg_voice = mv; opts.voice_provider = STATE.motiongit ? 'motiongit' : 'edge';
+    }
+    if (talkMode === 'auto' && !CUR.talkPath) {
+      if (!confirm('还没上传口播原片，模板只能按文案纯文字出片（声音是合成的）。继续吗？')) return;
+    }
+    if (CUR.srtPath) opts.srt_path = CUR.srtPath;
     return launchRender({script_id:+sid, render_mode:'motion', motion_package:pkg,
-                         video_path: CUR.talkPath || '', motion_input:opts});
+                         video_path: talkMode === 'auto' ? (CUR.talkPath || '') : '',
+                         motion_input:opts});
   }
 }
 
@@ -817,6 +843,23 @@ async function loadMotionPackages() {
   sel.innerHTML = MOTION_PKGS.map(m => `<option value="${esc(m.name)}">${esc(m.name)}（${esc(m.profile||'?')}）${m.complete===false?' ⚠ 不完整':''}</option>`).join('');
   onMotionPkg();
 }
+function syncTalkModeUI() {
+  const sel = $('motionTalkMode'); if (!sel) return;
+  const hint = $('motionTalkHint'); const voice = $('motionVoice');
+  const fromTalk = sel.value === 'auto';
+  if (voice) voice.disabled = fromTalk;
+  if (hint) {
+    if (fromTalk && CUR.talkPath) {
+      hint.innerHTML = '✓ 将使用第 4 步上传的口播原声：成片长度＝你的口播长度，字幕按你的原话对时，每隔十余秒露一次脸。';
+    } else if (fromTalk) {
+      hint.innerHTML = '⚠ 还没上传口播原片，去第 4 步上传；不传就退化成纯文字＋合成配音。';
+    } else {
+      hint.innerHTML = '模板会按文案合成配音，时间轴按字数估算，可能与画面不完全同步。';
+    }
+  }
+}
+$('motionTalkMode') && ($('motionTalkMode').onchange = syncTalkModeUI);
+
 function onMotionPkg() {
   const name = $('motionPkg').value;
   const m = MOTION_PKGS.find(x => x.name === name);
@@ -830,6 +873,7 @@ function onMotionPkg() {
     : '';
   $('motionPkgMeta').innerHTML = warn + kitNote + `入口 <b>${esc(m.entry||'—')}</b>｜画幅 ${esc(layouts)}｜场景 ${(m.scenes||[]).length} 个｜配音槽 ${esc((m.voice_modes||[]).join('/'))}` +
     (m.notes && m.notes.length ? `<br><span class="muted">${esc(m.notes.join('；'))}</span>` : '');
+  syncTalkModeUI();
   const sc = m.scenes || [];
   $('motionScenes').innerHTML = sc.length ? sc.map(s => `
     <label><input type="checkbox" value="${esc(s.id)}" checked/> ${esc(s.id)} ${s.start!=null?`<span class="muted">(${s.start}s–${s.end}s)</span>`:''}</label>`).join('')
