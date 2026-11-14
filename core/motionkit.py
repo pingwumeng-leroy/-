@@ -2295,14 +2295,13 @@ def build_poster_talk(script, opts, talk_name, caps, vdur, log=None, profile=Non
             log("⚠ 切点对齐后时间轴不合规（%s），放弃对齐" % "；".join(issues[:2]))
             segs = [dict(sg) for sg in timeline["segments"]]
         timeline["segments"] = segs
-        rows = _narration_rows(segs, timeline["captions"])
-        loose = [r["shot"] for r in rows[:-1] if r["captionIndices"] and (
-            round(timeline["captions"][r["captionIndices"][0]]["t0"], 2) > r["start"] + 0.02 or
-            round(timeline["captions"][r["captionIndices"][-1]]["t1"], 2) < r["end"] - 0.02)]
-        if loose:
-            log("⚠ %d 个镜头的切点落在句子中间（#%s），模板可能要求字幕完整覆盖"
-                % (len(loose), ",".join(str(x) for x in loose[:6])))
-        timeline["narrationMap"] = rows
+        # 字幕和镜头必须是同一套时钟：captionIndices 指的就是这份列表，
+        # 而字幕文件也由它生成，否则模板拿 captions.srt 一比对就对不上。
+        _resync_captions_to_shots(segs, timeline["captions"], log)
+        timeline["captions"] = [{"t0": round(c["t0"], 2), "t1": round(c["t1"], 2),
+                                 "text": c["text"]} for c in timeline["captions"]]
+        timeline["narrationMap"] = _narration_rows(segs, timeline["captions"])
+        _audit_narration(timeline, log)
     return timeline
 
 
@@ -2591,6 +2590,61 @@ def _poster_props(ctl, text, title, company, opts):
         return {"kicker": title[:32], "word": _cut(parts[0] if parts else t, 10),
                 "sub": [_cut(x, 22) for x in parts[1:3]]}
     return {"kicker": _cut(title, 20), "line1": _cut(t, 16), "line2": ""}
+
+
+def _resync_captions_to_shots(shots, caps, log=None):
+    """把字幕边界对齐到镜头切点，保证「字幕 ⇄ 镜头」是同一套时钟。
+
+    模板会拿 captions.srt 和 narrationMap.captionIndices 交叉比对。只要
+    字幕在某条边上比镜头早 5~10ms（很常见：镜头按 2 位、字幕按 3 位），
+    圈定就会出现“多一条 / 少一条”。所以这里把字幕边界整体吸附到镜头边界：
+      * 首尾两条跟着片头、片尾走；
+      * 中间每条字幕的起点，吸附到最近的镜头切点（±0.12s 内才吸）；
+      * 吸完若出现短于 0.3s 的字幕，撤销这一次吸附（宁可不对齐也不切碎句子）。
+    只动字幕时间，不动人声、不动文案。
+    """
+    log = log or (lambda m: None)
+    if not caps or not shots:
+        return caps
+    edges = sorted({round(s["t0"], 2) for s in shots} | {round(s["t1"], 2) for s in shots})
+    n_before = len(caps)
+    prev = 0.0
+    fixed = 0
+    for i, c in enumerate(caps):
+        if i > 0:
+            e = min(edges, key=lambda x: abs(x - c["t0"]))
+            if 0.001 < abs(e - c["t0"]) <= 0.12:
+                prev_end = round(caps[i - 1]["t1"], 2)
+                nxt_end = round(caps[i + 1]["t1"], 2) if i + 1 < len(caps) else c["t1"]
+                if e - prev_end > 0.3 and nxt_end - e > 0.3:
+                    c["t0"] = e
+                    caps[i - 1]["t1"] = e
+                    fixed += 1
+    if fixed:
+        log("已把 %d 条字幕边界对齐到镜头切点（字幕与镜头同一时钟）" % fixed)
+    return caps[:n_before]
+
+
+def _audit_narration(tl, log=None):
+    """出片前按模板口径逐屏对账，把结论写进日志（失败时可据此定位）。"""
+    log = log or (lambda m: None)
+    segs, caps = tl.get("segments") or [], tl.get("captions") or []
+    rows = tl.get("narrationMap") or []
+    if not caps or not rows:
+        return
+    issues = []
+    for k, r in enumerate(rows[:len(segs)]):
+        s0, s1 = round(segs[k]["t0"], 2), round(segs[k]["t1"], 2)
+        want = [i for i, c in enumerate(caps)
+                if round(c["t0"], 2) < s1 - 0.001 and round(c["t1"], 2) > s0 + 0.001]
+        got = list(r.get("captionIndices") or [])
+        if want and got != want:
+            issues.append("#%d 圈定 %s ≠ 相交 %s" % (k, got[:5], want[:5]))
+    if issues:
+        log("⚠ 字幕圈定与相交口径不一致（%d 处）：%s"
+            % (len(issues), "；".join(issues[:3])))
+    else:
+        log("字幕圈定自检通过：%d 屏 / %d 条字幕" % (len(segs), len(caps)))
 
 
 def _narration_rows(shots, caps):
