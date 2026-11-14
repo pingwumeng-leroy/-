@@ -1906,12 +1906,17 @@ def talk_captions(talk_path, work, srt_path=None, vdur=0.0, log=None):
     """取口播的真实字幕时间：用户字幕 → 本地 ASR → 按字数估（最后手段）。
 
     返回 (captions, source)。source 会写进日志，方便事后判断这段是不是真同步。
+
+    关键：字幕的时间轴必须和音轨同一个末端。用户 SRT 常见末尾多出 10~30ms
+    （AI 写稿工具按整秒收尾），而音轨实际只有 49.97s，模板就会报
+    RECOMPOSE_REQUIRED（timeline ends at 49.970s before captions ends at 50.000s）。
+    这里把超出的部分压回音轨长度：只动最后一条的结束时间，不删不加，不碰人声。
     """
     log = log or (lambda m: None)
     caps = srt_captions(srt_path) if srt_path else []
     if len(caps) >= 1:
         log("已用字幕文件对齐口播：%d 条" % len(caps))
-        return caps, "provided-srt"
+        return fit_captions(caps, vdur, log), "provided-srt"
     try:
         from . import transcript
         out_dir = os.path.join(work, "asr")
@@ -1920,13 +1925,44 @@ def talk_captions(talk_path, work, srt_path=None, vdur=0.0, log=None):
         caps = srt_captions(sp)
         if len(caps) >= 1:
             log("已用本地语音识别对齐口播：%d 条" % len(caps))
-            return caps, "asr"
+            return fit_captions(caps, vdur, log), "asr"
     except Exception as e:
         log("⚠ 语音识别不可用（%s）" % str(e)[:120])
     # 退化：按字数切分整段时长 —— 只能保证总长对，句内仍有偏差
-    body = "".join(c.get("text", "") for c in caps) or ""
     log("⚠ 没有字幕也没有语音识别，句级时间只能按字数估算，可能仍有错位")
     return [], "estimate"
+
+
+def fit_captions(caps, vdur, log=None):
+    """把字幕时间轴收进 [0, vdur]：末条超出就压到音轨末端。
+
+    模板要求字幕完整覆盖、且不能超出时间轴（RECOMPOSE_REQUIRED）。
+    音轨是硬约束（不能变速、不能裁人声），所以永远以音频为准裁字幕。
+    """
+    log = log or (lambda m: None)
+    if not caps or vdur <= 0:
+        return caps
+    out = [dict(c) for c in caps if c["t1"] > 0.001]
+    if not out:
+        return []
+    if out[0]["t0"] < 0:
+        out[0]["t0"] = 0.0
+    over = out[-1]["t1"] - vdur
+    if over > 0.001:
+        # 末条本来就短于 0.4s 时不要再压，改为砍掉这条（它几乎没被说出来）
+        if out[-1]["t1"] - out[-1]["t0"] <= 0.4:
+            log("末条字幕仅 %.2fs 且超出片尾 %.2fs，已丢弃这一条"
+                % (out[-1]["t1"] - out[-1]["t0"], over))
+            out.pop()
+        else:
+            out[-1]["t1"] = round(vdur, 3)
+            log("末条字幕超出片尾 %.3fs（字幕 %.2fs > 音轨 %.2fs），已压到片尾"
+                % (over, caps[-1]["t1"], vdur))
+    # 压完之后可能与倒数第二条重叠，往回收一下
+    for i in range(len(out) - 1, 0, -1):
+        if out[i]["t0"] < out[i - 1]["t1"] - 0.001:
+            out[i - 1]["t1"] = round(min(out[i - 1]["t1"], out[i]["t0"]), 3)
+    return [c for c in out if c["t1"] - c["t0"] > 0.05]
 
 
 def build_poster_talk(script, opts, talk_name, caps, vdur, log=None, profile=None):
@@ -1938,6 +1974,8 @@ def build_poster_talk(script, opts, talk_name, caps, vdur, log=None, profile=Non
     title = (script.get("title") or "").strip() or "企业服务那些事"
     company = (config.get_settings().get("company", {}) or {}).get("short", "合胜宏企服")
 
+    # 字幕时间轴先收进音轨长度：音轨不能改，字幕可以让。
+    caps = fit_captions(caps or [], vdur, log)
     # 片尾固定 4.5 秒（模板要求 4–6 秒），正文取其余时间
     outro_d = 4.5 if vdur > 12 else max(4.0, vdur * 0.3)
     body_end = max(4.0, vdur - outro_d)
@@ -1959,12 +1997,22 @@ def build_poster_talk(script, opts, talk_name, caps, vdur, log=None, profile=Non
         blocks = [{"t0": 0.0, "t1": body_end, "text": title}]
     blocks[0]["t0"] = 0.0
     blocks[-1]["t1"] = body_end
+    # 片头那屏已经覆盖的句子不要整段再铺一遍：把跨片头的那句开头推到片头之后
+    # （只在正文够长时做，极短片不设片头，见下）
+    if body_end >= 12.0 and len(blocks) > 1:
+        for b in blocks[1:]:
+            if b["t0"] < 2.2 and b["t1"] > 3.6:
+                b["t0"] = 3.4
 
     # 片头：第一屏让位给 opener（2.2–3.4 秒），其余内容顺延
     op_end = min(3.4, max(2.2, min(blocks[0]["t1"], 3.4)))
-    shots = [{"t0": 0.0, "t1": round(op_end, 2), "control": "opener", "variant": "focus",
-              "props": {"title": _cut(title, 9), "a": company[:16], "b": ""},
-              "text": blocks[0]["text"]}]
+    # 极短片（<15s）：正文塞不下 opener + 一屏正文 + 片尾的时长下限，不设片头
+    if body_end < POSTER_MIN["opener"] + POSTER_MIN_DEFAULT + 6.0:
+        op_end = 0.0
+    shots = [] if op_end <= 0.01 else [
+        {"t0": 0.0, "t1": round(op_end, 2), "control": "opener", "variant": "focus",
+         "props": {"title": _cut(title, 9), "a": company[:16], "b": ""},
+         "text": blocks[0]["text"]}]
 
     # 正文从 op_end 开始，按字幕边界铺满 body_end
     cuts = [b["t0"] for b in blocks if b["t0"] > op_end + 0.3] + [body_end]
@@ -1976,6 +2024,8 @@ def build_poster_talk(script, opts, talk_name, caps, vdur, log=None, profile=Non
         lo = POSTER_MIN.get(ctl, POSTER_MIN_DEFAULT)
         hi = poster_max(ctl)
         # 候选切点：所有字幕边界 + 逐秒网格，取最长的合法区间
+        # 候选切点：字幕边界优先（不会切在半句话中间），但必须落在 [lo, hi] 内。
+        # 字幕边界都不在区间里时退回固定网格，否则一屏会撑到 5 秒撞上限。
         cand = [c for c in cuts if cur + lo - 0.05 <= c <= cur + hi + 0.05]
         if cand:
             end = max(cand)
@@ -2026,14 +2076,74 @@ def build_poster_talk(script, opts, talk_name, caps, vdur, log=None, profile=Non
                      round(min(sg["t0"] + 0.15 + OUT_HOLD, sg["t1"] - 0.1), 2)])
         last_out = sg["t0"]
 
-    # 正文最后一段必须正好收在 body_end：多出来的并回前一段，短了就别越界
-    if len(shots) > 1 and abs(shots[-1]["t1"] - body_end) > 0.01:
+    # 正文最后一段必须正好收在 body_end：多出来的并回前一段，短了就别越界。
+    # 注意 body_end 可能在上面被改小过，这里必须重新取（否则会算出 5 秒超长屏）。
+    if len(shots) > 1:
         last = shots[-1]
-        if body_end - last["t0"] >= POSTER_MIN.get(last["control"], POSTER_MIN_DEFAULT):
-            last["t1"] = round(body_end, 2)
-        else:
+        span = round(body_end - last["t0"], 2)
+        lo_last = POSTER_MIN.get(last["control"], POSTER_MIN_DEFAULT)
+        hi_last = poster_max(last["control"])
+        if span <= 0.05:
             shots.pop()
             shots[-1]["t1"] = round(body_end, 2)
+        elif span < lo_last:
+            # 尾巴不够一屏：并进前一段，前一段若因此超上限就拆一次
+            shots.pop()
+            shots[-1]["t1"] = round(body_end, 2)
+            d = shots[-1]["t1"] - shots[-1]["t0"]
+            if d > poster_max(shots[-1]["control"]) + 0.02:
+                mid = round(shots[-1]["t0"] + d / 2.0, 2)
+                tail = dict(shots[-1])
+                shots[-1]["t1"] = mid
+                tail["t0"] = mid
+                shots.insert(len(shots), tail)
+            last = shots[-1]
+        else:
+            last["t1"] = round(min(body_end, last["t0"] + hi_last), 2)
+        # 拆完再兜一次：任何一屏都不许越过模板上限
+        for k in range(len(shots) - 1, 1, -1):
+            sg = shots[k]
+            d = sg["t1"] - sg["t0"]
+            if d > poster_max(sg["control"]) + 0.02:
+                mid = round(sg["t0"] + d / 2.0, 2)
+                nxt = dict(sg)
+                sg["t1"] = mid
+                nxt["t0"] = mid
+                shots.insert(k + 1, nxt)
+        # 收尾对齐：最后一屏必须正好到 body_end，缝隙补到前一屏
+        if len(shots) > 1 and abs(shots[-1]["t1"] - body_end) > 0.01:
+            shots[-1]["t1"] = round(body_end, 2)
+        for k in range(1, len(shots)):
+            if abs(shots[k]["t0"] - shots[k - 1]["t1"]) > 0.011:
+                shots[k]["t0"] = shots[k - 1]["t1"]
+        # 均分切出来的两屏可能都跌破下限：让它们重新分回一屏（不越过上限）
+        if _merge_short_shots(shots, 1):
+            if abs(shots[-1]["t1"] - body_end) > 0.01:
+                shots[-1]["t1"] = round(body_end, 2)
+
+    _merge_short_shots(shots)
+    # 并屏之后末屏可能被并长了，但片尾紧跟着，必须保证末屏不越上限、正好贴 body_end
+    if len(shots) > 1:
+        last = shots[-1]
+        if last["t1"] - last["t0"] > poster_max(last["control"]) + 0.02 \
+                and shots[-2]["control"] != "opener":
+            d = last["t1"] - last["t0"]
+            mid = round(last["t0"] + d / 2.0, 2)
+            nxt = dict(last)
+            last["t1"] = mid
+            nxt["t0"] = mid
+            shots.append(nxt)
+        shots[-1]["t1"] = round(body_end, 2)
+    # 最后一道：仍低于下限的屏，从前一屏借时间（前一屏留够自己下限即可）
+    _borrow_to_fill(shots, body_end)
+    _split_long_shots(shots)
+    _borrow_to_fill(shots, body_end)
+    _split_long_shots(shots)
+    _borrow_to_fill(shots, body_end)
+    # 极短片兜底：内容实在太少，仍可能有一屏超过上限（模板宁长不可超），
+    # 这种情况给用户一句明确提示，而不是等 check-params 报错。
+    if any(s["t1"] - s["t0"] > poster_max(s["control"]) + 0.02 for s in shots[1:]):
+        log("⚠ 口播太短（%.1fs），模板屏数不够分摊，建议片长 ≥15 秒" % vdur)
 
     # ---- 3. 片尾 ----
     shots.append({"t0": round(body_end, 2), "t1": round(vdur, 2),
@@ -2067,6 +2177,216 @@ def build_poster_talk(script, opts, talk_name, caps, vdur, log=None, profile=Non
                                 for c in caps]
         timeline["narrationMap"] = _narration_rows(shots, timeline["captions"])
     return timeline
+
+
+def _merge_short_shots(shots, start=1):
+    """把低于模板下限的相邻两屏并回一屏（前提是合起来不越过上限）。
+
+    只在“同一控件被均分成两屏，结果两屏都不够长”时发生。并屏不删文字，
+    只是让这一屏多停一会儿；返回是否改动过。
+    """
+    changed = False
+    k = max(1, start)
+    while k < len(shots) - 1:
+        a, b = shots[k], shots[k + 1]
+        if a["control"] == b["control"]:
+            la = POSTER_MIN.get(a["control"], POSTER_MIN_DEFAULT)
+            d = b["t1"] - a["t0"]
+            if (a["t1"] - a["t0"] < la - 0.02 or
+                    b["t1"] - b["t0"] < POSTER_MIN.get(b["control"], POSTER_MIN_DEFAULT) - 0.02) \
+                    and d <= poster_max(a["control"]) + 0.02:
+                a["t1"] = b["t1"]
+                if len(a.get("text", "")) < len(b.get("text", "")):
+                    a["text"] = (a.get("text", "") + b.get("text", ""))[:120]
+                shots.pop(k + 1)
+                changed = True
+                continue
+        k += 1
+    return changed
+
+
+def _borrow_to_fill(shots, body_end):
+    """末屏不足下限时向前借时间；借不动就并屏。必须保证：无缝隙、不越上限。
+
+    这是最后一道闸：模板对单屏上下限卡得很死，界面上表现为
+    “xxx 至少 N 秒，现在 M 秒”，一轮渲染几分钟，本地先修掉。
+    """
+    for _ in range(24):
+        bad = None
+        for k in range(1, len(shots)):
+            lo = POSTER_MIN.get(shots[k]["control"], POSTER_MIN_DEFAULT)
+            if shots[k]["t1"] - shots[k]["t0"] < lo - 0.02:
+                bad = k
+                break
+        if bad is None:
+            # 末屏对齐到 body_end（只补缝隙，不改总量）
+            if abs(shots[-1]["t1"] - body_end) > 0.01 and \
+                    shots[-1]["t1"] < body_end:
+                shots[-1]["t1"] = round(body_end, 2)
+            return True
+        k = bad
+        need = POSTER_MIN.get(shots[k]["control"], POSTER_MIN_DEFAULT) - \
+            (shots[k]["t1"] - shots[k]["t0"])
+        prev = shots[k - 1]
+        prev_lo = POSTER_MIN.get(prev["control"], POSTER_MIN_DEFAULT)
+        room = (prev["t1"] - prev["t0"]) - prev_lo      # 前一屏能吐出的时间
+        if room >= need - 0.001:
+            prev["t1"] = round(prev["t1"] - need, 2)
+            shots[k]["t0"] = prev["t1"]
+            continue
+        # 借不够：并屏（合起来仍在上一屏上限内才并）
+        merged = shots[k]["t1"] - prev["t0"]
+        if merged <= poster_max(prev["control"]) + 0.02 and k - 1 >= 1:
+            prev["t1"] = shots[k]["t1"]
+            if len(prev.get("text", "")) < len(shots[k].get("text", "")):
+                prev["text"] = (prev.get("text", "") + shots[k].get("text", ""))[:120]
+            shots.pop(k)
+            continue
+        # 并了会超上限：把前一屏多余的时间吐给再前一屏，腾出空间再并
+        if k - 2 >= 1:
+            pp = shots[k - 2]
+            pp_lo = POSTER_MIN.get(pp["control"], POSTER_MIN_DEFAULT)
+            need_more = merged - (poster_max(prev["control"]) + 0.02)
+            give = min(max(0.0, (pp["t1"] - pp["t0"]) - pp_lo), need_more + 0.01)
+            if give > 0.001:
+                pp["t1"] = round(pp["t1"] - give, 2)
+                prev["t0"] = pp["t1"]
+                prev["t1"] = round(prev["t1"] - give, 2)
+                shots[k]["t0"] = prev["t1"]
+                continue
+            # 前两屏都吐不出来：把这一屏整体并进前一屏（上一屏本来就在上限内）
+            if (prev["t1"] - prev["t0"]) <= poster_max(prev["control"]) + 0.02:
+                prev["t1"] = shots[k]["t1"]
+                shots.pop(k)
+                continue
+        # 实在动不了：把这一屏并进前一屏，并把前一屏从中间拆开（拆完两屏都合法）
+        d = shots[k]["t1"] - prev["t0"]
+        # 先试着把自己整体并进前一屏（前一屏本来就在上限内就最省事）
+        if (prev["t1"] - prev["t0"]) <= poster_max(prev["control"]) + 0.02:
+            prev["t1"] = shots[k]["t1"]
+            if len(prev.get("text", "")) < len(shots[k].get("text", "")):
+                prev["text"] = (prev.get("text", "") + shots[k].get("text", ""))[:120]
+            shots.pop(k)
+            continue
+        mid = round(prev["t0"] + min(poster_max(prev["control"]),
+                                     max(POSTER_MIN.get(prev["control"],
+                                                        POSTER_MIN_DEFAULT),
+                                         d - POSTER_MIN.get(shots[k]["control"],
+                                                            POSTER_MIN_DEFAULT))), 2)
+        tail = dict(prev)
+        prev["t1"] = mid
+        tail["t0"] = mid
+        tail["t1"] = shots[k]["t1"]
+        shots[k] = tail
+        continue
+    # 到这里仍有屏低于下限：从片尾借（片尾容许多停，不低于下限就行）
+    for k in range(1, len(shots)):
+        lo = POSTER_MIN.get(shots[k]["control"], POSTER_MIN_DEFAULT)
+        need = lo - (shots[k]["t1"] - shots[k]["t0"])
+        if need <= 0.02:
+            continue
+        prev = shots[k - 1]
+        room = (prev["t1"] - prev["t0"]) - POSTER_MIN.get(prev["control"],
+                                                          POSTER_MIN_DEFAULT)
+        if room >= need:
+            prev["t1"] = round(prev["t1"] - need, 2)
+            shots[k]["t0"] = prev["t1"]
+        elif k - 1 >= 1 and shots[k]["t1"] == round(body_end, 2):
+            # 末屏太短：把起点往前拉（前一屏会被压到下限，只要不破下限就接受）
+            pull = min(need, (prev["t1"] - prev["t0"]) -
+                       POSTER_MIN.get(prev["control"], POSTER_MIN_DEFAULT) + need)
+            if pull > 0.01:
+                prev["t1"] = round(prev["t1"] - pull, 2)
+                shots[k]["t0"] = prev["t1"]
+    return False
+
+
+def _split_long_shots(shots):
+    """把超过模板上限的屏拆开，并让拆出来的每一屏都落回 [下限, 上限]。
+
+    做法：先对半拆，再把过短的一半从邻居挪时间；实在挪不动就再拆一半，
+    直到整条时间轴没有越界，或确实无可再拆。
+    """
+    for _ in range(200):
+        hit = next((k for k in range(1, len(shots))
+                    if shots[k]["t1"] - shots[k]["t0"] >
+                    poster_max(shots[k]["control"]) + 0.02), None)
+        if hit is None:
+            return True
+        sg = shots[hit]
+        d = sg["t1"] - sg["t0"]
+        mid = round(sg["t0"] + d / 2.0, 2)
+        nxt = dict(sg)
+        sg["t1"] = mid
+        nxt["t0"] = mid
+        shots.insert(hit + 1, nxt)
+        # 修拆出来的两屏：低于下限就从邻居挪；邻居没富余就把拆分点往邻居方向挪
+        for j in (hit, hit + 1):
+            s2 = shots[j]
+            short = POSTER_MIN.get(s2["control"], POSTER_MIN_DEFAULT) - (s2["t1"] - s2["t0"])
+            if short <= 0.02:
+                continue
+            nb = shots[j + 1] if j + 1 < len(shots) else None
+            if nb is not None and (nb["t1"] - nb["t0"]) - \
+                    POSTER_MIN.get(nb["control"], POSTER_MIN_DEFAULT) >= short:
+                nb["t0"] = round(nb["t0"] - short, 2)
+                s2["t1"] = round(s2["t1"] - short, 2)
+                continue
+            pv = shots[j - 1] if j - 1 >= 1 else None
+            if pv is not None:
+                room = (pv["t1"] - pv["t0"]) - \
+                    POSTER_MIN.get(pv["control"], POSTER_MIN_DEFAULT)
+                if room >= short:
+                    pv["t1"] = round(pv["t1"] + short, 2)
+                    s2["t0"] = pv["t1"]
+                    continue
+                # 邻居也满了：把这一屏的边界往邻居里推，让邻居承接到限为止
+                if nb is not None and j == hit:
+                    take = min(short, poster_max(nb["control"]) + 0.0 - (nb["t1"] - nb["t0"]))
+                    if take > 0.01:
+                        nb["t0"] = round(nb["t0"] - take, 2)
+                        s2["t1"] = round(s2["t1"] - take, 2)
+                        continue
+                if pv is not None and j == hit + 1:
+                    take = min(short, poster_max(pv["control"]) + 0.0 - (pv["t1"] - pv["t0"]))
+                    if take > 0.01:
+                        pv["t1"] = round(pv["t1"] + take, 2)
+                        s2["t0"] = pv["t1"]
+                        continue
+            # 邻居都没富余：这一半还是太长的话再二分一次（下一轮处理）
+    return False
+
+
+def check_talk_timeline(tl, vdur):
+    """提交前拦 RECOMPOSE_REQUIRED：末段必须正好落在音轨末端，字幕不能越过它。
+
+    这两条模板在 check-params 阶段才报，一轮要等几分钟；本地先用毫秒级比较拦住。
+    """
+    segs = tl.get("segments") or []
+    if not segs:
+        return ["时间轴没有镜头"]
+    bad = []
+    end = round(segs[-1]["t1"], 2)
+    if abs(end - round(vdur, 2)) > 0.011:
+        bad.append("末段收在 %.2fs，音轨 %.2fs" % (end, vdur))
+    caps = tl.get("captions") or []
+    if caps:
+        ce = round(caps[-1]["t1"], 2)
+        if end < ce - 0.001:
+            bad.append("末段 %.2fs 早于字幕结尾 %.2fs" % (end, ce))
+    prev = 0.0
+    for k, s in enumerate(segs):
+        if abs(s["t0"] - prev) > 0.015:
+            bad.append("#%d 与前一段有 %.2fs 缝隙" % (k, s["t0"] - prev))
+        lo = POSTER_MIN.get(s["control"], POSTER_MIN_DEFAULT)
+        hi = poster_max(s["control"])
+        d = s["t1"] - s["t0"]
+        if d < lo - 0.02:
+            bad.append("#%d %s 仅 %.2fs（下限 %.1fs）" % (k, s["control"], d, lo))
+        if d > hi + 0.02:
+            bad.append("#%d %s 达 %.2fs（上限 %.1fs）" % (k, s["control"], d, hi))
+        prev = s["t1"]
+    return bad
 
 
 def _poster_props(ctl, text, title, company, opts):
@@ -2271,6 +2591,16 @@ def render(job_id, root, log=None):
                                         kit.profile)
             # 出镜区间的视频由 ffmpeg 在成片阶段叠加（见 _overlay_talk）
             timeline["voiceover"] = vname
+            talk_bad = check_talk_timeline(timeline, talk_dur)
+            if talk_bad:
+                # 能自愈的先自愈：重排一次（fit_captions 已保证字幕不越界）
+                log("⚠ 口播时间轴自检不通过：%s，重排一次" % "；".join(talk_bad[:3]))
+                timeline = build_poster_talk(script, opts, tname, caps, talk_dur,
+                                             log, kit.profile)
+                timeline["voiceover"] = vname
+                left = check_talk_timeline(timeline, talk_dur)
+                if left:
+                    raise KitError("口播时间轴不符合模板要求：%s" % "；".join(left[:4]))
             log("对时依据：%s，共 %d 段" % (cap_src, len(timeline["segments"])))
         # 没有原片：仍走 TTS + 文案估时（旧行为）
         elif not opts.get("voiceover") and (opts.get("voice") or opts.get("mg_voice")):
