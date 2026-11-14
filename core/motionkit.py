@@ -836,6 +836,12 @@ POSTER_MIN = {
 }
 POSTER_MIN_DEFAULT = 2.0
 
+# 模板字幕最多两行，中文一行约 13~16 字（1080×1920、字号 52~64px）。
+# 单条字幕一旦超两行，渲染器直接抛 “Caption exceeds two explicit lines”，
+# 预览阶段就整片失败。所以按 24 个字宽（=两行各 12 字）切，给字号最大的一档也留余量。
+CAPTION_MAX_WIDTH = 24
+_CAP_BREAKS = set("，。！？；：、,.!?;:…—）)】」』")
+
 # 模板硬性最长时长。spec 只写了 minDur，上限藏在渲染器的 controls/*.js 里，
 # 超了会报“脚本错误：xxx 时长需为 A–B 秒”（实测 opener 上限 3.5s）。
 # 这里按渲染器报错反推常用控件的区间，超过上限时宁可多切一屏，不硬拉长。
@@ -1916,7 +1922,8 @@ def talk_captions(talk_path, work, srt_path=None, vdur=0.0, log=None):
     caps = srt_captions(srt_path) if srt_path else []
     if len(caps) >= 1:
         log("已用字幕文件对齐口播：%d 条" % len(caps))
-        return fit_captions(caps, vdur, log), "provided-srt"
+        caps = split_long_captions(fit_captions(caps, vdur, log), log=log)
+        return caps, "provided-srt"
     try:
         from . import transcript
         out_dir = os.path.join(work, "asr")
@@ -1925,7 +1932,8 @@ def talk_captions(talk_path, work, srt_path=None, vdur=0.0, log=None):
         caps = srt_captions(sp)
         if len(caps) >= 1:
             log("已用本地语音识别对齐口播：%d 条" % len(caps))
-            return fit_captions(caps, vdur, log), "asr"
+            caps = split_long_captions(fit_captions(caps, vdur, log), log=log)
+            return caps, "asr"
     except Exception as e:
         log("⚠ 语音识别不可用（%s）" % str(e)[:120])
     # 退化：按字数切分整段时长 —— 只能保证总长对，句内仍有偏差
@@ -1955,14 +1963,99 @@ def fit_captions(caps, vdur, log=None):
                 % (out[-1]["t1"] - out[-1]["t0"], over))
             out.pop()
         else:
-            out[-1]["t1"] = round(vdur, 3)
+            # 与片尾同一套舍入（round 2 位），否则 150.775 这类值会出现
+            # 片尾 150.77、字幕 150.78 的 10ms 越界，又触发 RECOMPOSE_REQUIRED
+            out[-1]["t1"] = round(vdur, 2)
             log("末条字幕超出片尾 %.3fs（字幕 %.2fs > 音轨 %.2fs），已压到片尾"
                 % (over, caps[-1]["t1"], vdur))
     # 压完之后可能与倒数第二条重叠，往回收一下
     for i in range(len(out) - 1, 0, -1):
         if out[i]["t0"] < out[i - 1]["t1"] - 0.001:
             out[i - 1]["t1"] = round(min(out[i - 1]["t1"], out[i]["t0"]), 3)
+    # 最后再统一一次末端：片尾按 2 位舍入，字幕也必须用同一个值，
+    # 否则 150.775 这种会变成「片尾 150.77、字幕 150.78」的 10ms 越界。
+    lim = round(vdur, 2)
+    if out and out[-1]["t1"] > lim:
+        out[-1]["t1"] = lim
     return [c for c in out if c["t1"] - c["t0"] > 0.05]
+
+
+def _cap_width(s):
+    """按显示宽度估算字数：中文/全角算 1，拉丁字母数字算 0.55。"""
+    w = 0.0
+    for ch in s or "":
+        w += 0.55 if ord(ch) < 0x2E80 else 1.0
+    return w
+
+
+def _is_word(ch):
+    return ch.isascii() and (ch.isalnum() or ch in "'-")
+
+
+def _cut_caption(text, max_w=CAPTION_MAX_WIDTH):
+    """把一句太长的话切成若干段，每段都不超过模板的两行宽度。
+
+    优先在标点处断开（不会把半句话糊在一起），标点太靠前就硬切，
+    硬切也不劈开英文单词。
+    """
+    t = re.sub(r"\s+", " ", (text or "")).strip()
+    out = []
+    while t:
+        if _cap_width(t) <= max_w:
+            out.append(t)
+            break
+        w, idx, brk = 0.0, 0, -1
+        for i, ch in enumerate(t):
+            cw = 0.55 if ord(ch) < 0x2E80 else 1.0
+            if w + cw > max_w:
+                break
+            w += cw
+            idx = i + 1
+            if ch in _CAP_BREAKS:
+                brk = i + 1
+        cut = brk if brk >= max(2, int(idx * 0.5)) else idx
+        if 0 < cut < len(t) and _is_word(t[cut - 1]) and _is_word(t[cut]):
+            j = cut
+            while j > 0 and _is_word(t[j - 1]):
+                j -= 1
+            cut = max(1, j) if j >= int(idx * 0.5) else cut
+        out.append(t[:cut].strip())
+        t = t[cut:].strip()
+    return [c for c in out if c]
+
+
+def split_long_captions(caps, max_w=CAPTION_MAX_WIDTH, log=None):
+    """把每条字幕都收进模板的两行上限内，时间按字数比例分给切出来的短句。
+
+    不改口播、不改总时长：切点只用原字幕的 [t0,t1]，前后首尾相接，
+    所以 continuous 的字幕覆盖仍然连续，RECOMPOSE_REQUIRED 不会因此触发。
+    """
+    log = log or (lambda m: None)
+    out, nsplit = [], 0
+    for c in caps or []:
+        t0, t1 = round(float(c["t0"]), 3), round(float(c["t1"]), 3)
+        text = (c.get("text") or "").strip()
+        if not text or t1 - t0 <= 0.001:
+            continue
+        parts = _cut_caption(text, max_w) if _cap_width(text) > max_w else [text]
+        if len(parts) <= 1:
+            out.append({"t0": t0, "t1": t1, "text": text})
+            continue
+        nsplit += 1
+        ws = [_cap_width(p) or 1.0 for p in parts]
+        tot = sum(ws)
+        acc, cur = 0.0, t0
+        for i, (p, w) in enumerate(zip(parts, ws)):
+            acc += w
+            end = t1 if i == len(parts) - 1 else round(t0 + (t1 - t0) * acc / tot, 3)
+            if end - cur < 0.05:
+                end = min(t1, round(cur + 0.05, 3))
+            out.append({"t0": round(cur, 3), "t1": round(end, 3), "text": p})
+            cur = round(end, 3)
+    if nsplit:
+        log("字幕有 %d 条超过模板两行上限，已按时长比例拆成 %d 条"
+            % (nsplit, len(out)))
+    return out
 
 
 def build_poster_talk(script, opts, talk_name, caps, vdur, log=None, profile=None):
@@ -1975,7 +2068,8 @@ def build_poster_talk(script, opts, talk_name, caps, vdur, log=None, profile=Non
     company = (config.get_settings().get("company", {}) or {}).get("short", "合胜宏企服")
 
     # 字幕时间轴先收进音轨长度：音轨不能改，字幕可以让。
-    caps = fit_captions(caps or [], vdur, log)
+    # 再把过长的句子拆成两行以内的短句（模板对单条字幕有硬性行数限制）。
+    caps = split_long_captions(fit_captions(caps or [], vdur, log), log=log)
     # 片尾固定 4.5 秒（模板要求 4–6 秒），正文取其余时间
     outro_d = 4.5 if vdur > 12 else max(4.0, vdur * 0.3)
     body_end = max(4.0, vdur - outro_d)
@@ -2374,6 +2468,10 @@ def check_talk_timeline(tl, vdur):
         ce = round(caps[-1]["t1"], 2)
         if end < ce - 0.001:
             bad.append("末段 %.2fs 早于字幕结尾 %.2fs" % (end, ce))
+        for c in caps:
+            if _cap_width(c.get("text") or "") > CAPTION_MAX_WIDTH + 4:
+                bad.append("字幕超过两行：「%s」" % (c.get("text") or "")[:16])
+                break
     prev = 0.0
     for k, s in enumerate(segs):
         if abs(s["t0"] - prev) > 0.015:
