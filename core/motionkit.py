@@ -1923,7 +1923,8 @@ def talk_captions(talk_path, work, srt_path=None, vdur=0.0, log=None):
     caps = srt_captions(srt_path) if srt_path else []
     if len(caps) >= 1:
         log("已用字幕文件对齐口播：%d 条" % len(caps))
-        caps = split_long_captions(fit_captions(caps, vdur, log), log=log)
+        caps = _log_boundaries(split_long_captions(fit_captions(caps, vdur, log),
+                                                   log=log), log)
         return caps, "provided-srt"
     try:
         from . import transcript
@@ -1933,7 +1934,8 @@ def talk_captions(talk_path, work, srt_path=None, vdur=0.0, log=None):
         caps = srt_captions(sp)
         if len(caps) >= 1:
             log("已用本地语音识别对齐口播：%d 条" % len(caps))
-            caps = split_long_captions(fit_captions(caps, vdur, log), log=log)
+            caps = _log_boundaries(split_long_captions(fit_captions(caps, vdur, log),
+                                                       log=log), log)
             return caps, "asr"
     except Exception as e:
         log("⚠ 语音识别不可用（%s）" % str(e)[:120])
@@ -2057,6 +2059,17 @@ def split_long_captions(caps, max_w=CAPTION_MAX_WIDTH, log=None):
         log("字幕有 %d 条超过模板两行上限，已按时长比例拆成 %d 条"
             % (nsplit, len(out)))
     return out
+
+
+def _log_boundaries(caps, log=None):
+    """把最终字幕的边界打进日志（模板校验失败时，这是唯一能对账的凭据）。"""
+    log = log or (lambda m: None)
+    if not caps:
+        return caps
+    lines = ["%d:%.2f-%.2f" % (i, c["t0"], c["t1"]) for i, c in enumerate(caps)]
+    log("字幕边界 %d 条：%s ... %s" % (len(caps), " ".join(lines[:6]),
+                                    " ".join(lines[-3:])))
+    return caps
 
 
 def build_poster_talk(script, opts, talk_name, caps, vdur, log=None, profile=None):
@@ -2270,7 +2283,26 @@ def build_poster_talk(script, opts, talk_name, caps, vdur, log=None, profile=Non
     if caps:
         timeline["captions"] = [{"t0": c["t0"], "t1": c["t1"], "text": c["text"]}
                                 for c in caps]
-        timeline["narrationMap"] = _narration_rows(shots, timeline["captions"])
+        # 模板要求 captionIndices 恰好等于「与本镜头重叠的全部字幕」，
+        # 切点落在句子中间时这句字幕会同时压两屏，只能二选一 → 必被判错。
+        # 所以先把切点吸到句子边界，再按「恰好相交」生成 narrationMap。
+        segs = _shift_to_caption_edges([dict(sg) for sg in timeline["segments"]],
+                                        timeline["captions"], body_end, vdur, log)
+        issues = check_talk_timeline(dict(timeline, segments=segs,
+                                          narrationMap=_narration_rows(segs,
+                                                  timeline["captions"])), vdur)
+        if issues:
+            log("⚠ 切点对齐后时间轴不合规（%s），放弃对齐" % "；".join(issues[:2]))
+            segs = [dict(sg) for sg in timeline["segments"]]
+        timeline["segments"] = segs
+        rows = _narration_rows(segs, timeline["captions"])
+        loose = [r["shot"] for r in rows[:-1] if r["captionIndices"] and (
+            round(timeline["captions"][r["captionIndices"][0]]["t0"], 2) > r["start"] + 0.02 or
+            round(timeline["captions"][r["captionIndices"][-1]]["t1"], 2) < r["end"] - 0.02)]
+        if loose:
+            log("⚠ %d 个镜头的切点落在句子中间（#%s），模板可能要求字幕完整覆盖"
+                % (len(loose), ",".join(str(x) for x in loose[:6])))
+        timeline["narrationMap"] = rows
     return timeline
 
 
@@ -2473,6 +2505,31 @@ def check_talk_timeline(tl, vdur):
             if _cap_width(c.get("text") or "") > CAPTION_MAX_WIDTH + 4:
                 bad.append("字幕超过两行：「%s」" % (c.get("text") or "")[:16])
                 break
+        # NARRATION_CONTINUITY：逐镜头复算「完整相交」的那组字幕，必须与
+        # captionIndices 完全一致。本轮两次线上失败都出在这，所以本地先按
+        # 模板口径逐条对账，不许把不一致的时间轴提交上去。
+        rows = tl.get("narrationMap") or []
+        if len(rows) != len(segs):
+            bad.append("narrationMap %d 行，镜头 %d 个" % (len(rows), len(segs)))
+        for k, r in enumerate(rows[:len(segs)]):
+            s0, s1 = round(segs[k]["t0"], 2), round(segs[k]["t1"], 2)
+            want = [i for i, c in enumerate(caps)
+                    if round(c["t0"], 2) < s1 - 0.001
+                    and round(c["t1"], 2) > s0 + 0.001]
+            got = list(r.get("captionIndices") or [])
+            if not want:
+                continue
+            if not got:
+                continue        # 整段镜头落在两句话之间（片尾常见），允许留空
+            if got != want:
+                bad.append("#%d captionIndices %s ≠ 相交 %s"
+                           % (k, got[:6], want[:6]))
+                continue
+            # 依据是否「盖满镜头」只做提示，不算失败：实测模板只认
+            # 「恰好相交」这一条，盖满与否由切点是否落在句子边界上决定。
+            c0, c1 = caps[want[0]]["t0"], caps[want[-1]]["t1"]
+            if (c0 > segs[k]["t0"] + 0.02 or c1 < segs[k]["t1"] - 0.02) and k < len(segs) - 1:
+                tl.setdefault("_captionGaps", []).append(k)
     prev = 0.0
     for k, s in enumerate(segs):
         if abs(s["t0"] - prev) > 0.015:
@@ -2537,42 +2594,29 @@ def _poster_props(ctl, text, title, company, opts):
 
 
 def _narration_rows(shots, caps):
-    """narrationMap：每屏一行，captionIndices 必须是「完整覆盖」的那一组字幕。
+    """narrationMap：每屏一行，captionIndices 按「完整相交」口径圈定。
 
-    模板校验器（NARRATION_CONTINUITY）的判据是：captionIndices 圈定的这些字幕
-    连起来（首尾相接）要完整盖住本屏的 [t0,t1]，外扩也不能圈进别的句子。
-    只取「相交」是不够的：字幕末尾 18.90、本屏起点 18.90 这种贴边关系，
-    按相交判会被漏掉，圈定区间就盖不满镜头，直接报
-    captionIndices must include exactly the complete cues intersecting this visual shot。
+    模板校验器（NARRATION_CONTINUITY）的报错原文是
+    “captionIndices must include exactly the complete cues intersecting this
+    visual shot”，字面口径是「与镜头有时间重叠的全部字幕」，多一条少一条都算错：
+    实测多带一条贴边字幕也会被拒。
 
-    另外圈定必须连续：中间跳一条不选，同样会“盖不满”。
-    所以这里从相交的最近一条开始，往两边只按连续下标扩张，直到覆盖整屏。
+    所以这里就按这个口径直接取，不做任何“补覆盖”的扩张——
+    上一轮为了盖满镜头多圈了一两条，反而必然触发这条校验。
     """
     rows = []
     n = len(caps)
     if n == 0:
         return rows
     for k, sg in enumerate(shots):
-        s0, s1 = float(sg["t0"]), float(sg["t1"])
+        s0, s1 = round(float(sg["t0"]), 2), round(float(sg["t1"]), 2)
         idx = [i for i, c in enumerate(caps)
-               if c["t0"] < s1 - 0.001 and c["t1"] > s0 + 0.001]
+               if round(c["t0"], 2) < s1 - 0.001 and round(c["t1"], 2) > s0 + 0.001]
         if not idx:
             mid = (s0 + s1) / 2.0
-            idx = [min(range(n), key=lambda i: abs((caps[i]["t0"] + caps[i]["t1"]) / 2.0 - mid))]
-        a, b = min(idx), max(idx)
-        # 左侧：还有比 s0 更早结束、且与本屏相接的字幕就继续吃进来
-        while a > 0 and caps[a - 1]["t1"] >= s0 and caps[a]["t0"] - caps[a - 1]["t1"] < 0.02:
-            a -= 1
-        # 右侧：本屏还没被盖满就往下一条吃，吃掉的字幕起点不得晚于 s1
-        # （否则圈定了本屏根本没在说的句子）。末屏贴片尾时允许吃到字幕末尾。
-        last_shot = k == len(shots) - 1
-        while b < n - 1 and caps[b]["t1"] < s1 - 0.001:
-            if not last_shot and caps[b + 1]["t0"] > s1 + 0.001:
-                break
-            b += 1
-        idx = list(range(a, b + 1))
+            idx = [min(range(n), key=lambda j: abs((caps[j]["t0"] + caps[j]["t1"]) / 2.0 - mid))]
         rows.append({
-            "shot": k, "start": round(sg["t0"], 2), "end": round(sg["t1"], 2),
+            "shot": k, "start": s0, "end": s1,
             "spokenText": "".join(caps[i]["text"] for i in idx)[:200],
             "purpose": "neutral-emphasis",
             "timingSource": "provided-captions",
@@ -2583,6 +2627,94 @@ def _narration_rows(shots, caps):
                        "timing": "sentence", "target": "props"} for i in idx],
         })
     return rows
+
+
+def _shift_to_caption_edges(shots, caps, body_end, vdur, log=None):
+    """把位于句子中间的镜头切点挪到最近的句子边界（只挪，不改总时长）。
+
+    模板 NARRATION_CONTINUITY 要求 captionIndices 恰好等于「与本镜头重叠的
+    全部字幕」。切点落在一句话中间时，这句字幕同时压住前后两屏，只能二选一，
+    怎么选都会被判“不对”；切点落在字幕边界上，这个条件才真正成立。
+
+    做法（不传花，直接收敛）：
+      1. 把每个内部切点吸到最近的字幕边界，并按模板上下限夹住；
+      2. 从第一屏开始往前扫，任何屏越界就从下一屏借/还；借不动再从上一屏借；
+         被带动改变的屏继续往后传（单趟传播）；
+      3. 全片仍不合法就放弃这次吸附（宁可不挪，也不提交非法时间轴）。
+    这几条平移只在相邻屏之间腾时间，总时长不变，片尾 4.5s 不受影响。
+    """
+    log = log or (lambda m: None)
+    if not caps or len(shots) < 3:
+        return shots
+    bounds = sorted({round(c["t0"], 2) for c in caps} | {round(c["t1"], 2) for c in caps})
+    original = [dict(sg) for sg in shots]
+
+    def lo(sg):
+        return POSTER_MIN.get(sg["control"], POSTER_MIN_DEFAULT)
+
+    def hi(sg):
+        return poster_max(sg["control"])
+
+    for k in range(1, len(shots) - 1):
+        sg = shots[k]
+        b = min(bounds, key=lambda x: abs(x - sg["t0"]))
+        if abs(b - sg["t0"]) <= 0.011:
+            continue
+        span = sg["t1"] - b
+        sg["t0"] = round(b, 2)
+        if span < lo(sg):
+            sg["t1"] = round(min(sg["t1"], b + lo(sg)), 2)
+        shots[k - 1]["t1"] = sg["t0"]
+
+    # 单趟传播：逐屏把越界时间交给邻居
+    for _ in range(4):
+        dirty = False
+        for k in range(1, len(shots)):
+            sg = shots[k]
+            d = sg["t1"] - sg["t0"]
+            need = (lo(sg) - d) if d < lo(sg) - 0.02 else (
+                -(d - hi(sg)) if d > hi(sg) + 0.02 else 0.0)
+            if abs(need) < 0.005:
+                continue
+            # 从下一屏拿（k+1 起点前移/后移）
+            if k + 1 < len(shots):
+                nb = shots[k + 1]
+                if need > 0:
+                    room = (nb["t1"] - nb["t0"]) - lo(nb)
+                    take = min(need, max(0.0, room))
+                else:
+                    room = hi(nb) - (nb["t1"] - nb["t0"])
+                    take = -min(-need, max(0.0, room))
+                if abs(take) > 0.004:
+                    b = round(sg["t1"] + take, 2)
+                    sg["t1"] = b
+                    nb["t0"] = b
+                    dirty = True
+                    continue
+            # 从上一屏拿
+            prev = shots[k - 1]
+            if need > 0:
+                room = (prev["t1"] - prev["t0"]) - lo(prev)
+                take = min(need, max(0.0, room))
+            else:
+                room = hi(prev) - (prev["t1"] - prev["t0"])
+                take = -min(-need, max(0.0, room))
+            if abs(take) > 0.004:
+                b = round(sg["t0"] - take, 2)
+                prev["t1"] = b
+                sg["t0"] = b
+                dirty = True
+        if not dirty:
+            break
+
+    for k in range(1, len(shots)):
+        if abs(shots[k]["t0"] - shots[k - 1]["t1"]) > 0.011:
+            shots[k]["t0"] = shots[k - 1]["t1"]
+    moved = sum(1 for a, b in zip(original, shots) if abs(a.get("t1") - b.get("t1")) > 0.011)
+    if not moved:
+        return original
+    log("已把 %d 个镜头切点对齐到句子边界（否则同一条字幕会跨两屏）" % moved)
+    return shots
 
 
 def _overlay_talk(film, talk, ranges, out_path, log=None):
