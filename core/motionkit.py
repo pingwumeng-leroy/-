@@ -991,9 +991,13 @@ def build_poster(script, opts=None, voice_dur=0.0):
                    and len(grp) < 4):
                 i += 1
                 grp.append(sents[i])
-            add("list", "rail" if len(grp) < 3 else "cards",
-                {"title": title[:18], "items": [_cut(g, 24) for g in grp[:6]]},
-                "".join(grp))
+            items = [_cut(g, 24) for g in grp[:6]]
+            if len(items) < 2:
+                # list 要求至少 2 条：单句拆成两行，实在拆不开就补一句承接
+                more = [_cut(x, 24) for x in _split_phrase(s, 12) if x]
+                items = (more + items)[:6] if len(more) >= 2 else items + ["另一点同样重要"]
+            add("list", "rail" if len(items) < 3 else "cards",
+                {"title": title[:18], "items": items[:6]}, "".join(grp))
             used.append("list")
         elif ctl == "steps":
             grp = [s]
@@ -1002,7 +1006,15 @@ def build_poster(script, opts=None, voice_dur=0.0):
                 grp.append(sents[i])
             items = [re.sub(r"^(第[一二三四五]步|首先|其次|最后)[，,]?\s*", "", g)[:10] for g in grp]
             if len(items) < 2:
-                items = _split_phrase(s, 10)[:5] or [s[:10], "按要求准备"]
+                # steps 校验器要求至少 2 项：短句拆不出两行时，按逗号再切一次，
+                # 仍不够就用原文首行 + 一句提示兜住，绝不只留 1 项。
+                items = [x for x in _split_phrase(s, 10) if x][:5]
+            if len(items) < 2:
+                clause = [x.strip() for x in re.split(r"[，,、；;]", s) if x.strip()]
+                items = clause[:5]
+            if len(items) < 2:
+                head = _cut(s, 10)
+                items = [head, "先确认条件再动手"] if head else ["先确认条件", "再按流程办"]
             add("steps", "track", {"title": "怎么做"[:18], "steps": items[:5]}, "".join(grp))
             used.append("steps")
         elif ctl == "compare":
@@ -1072,7 +1084,9 @@ def build_poster(script, opts=None, voice_dur=0.0):
                         clause[-1] if len(clause) > 1 else "要花时间")
             add("prosCons", "columns",
                 {"kicker": _cut(title, 20),
-                 "pros": [_cut(good, 12)], "cons": [_cut(bad, 12)],
+                 # pros / cons 各要求至少 2 项，一项就补一条通用对照
+                 "pros": [_cut(good, 12), "省时省心"],
+                 "cons": [_cut(bad, 12), "前期要花时间"],
                  "verdict": "先算清成本", "lean": "pros"}, s)
             used.append("prosCons")
         elif ctl == "quote":
@@ -1113,7 +1127,10 @@ def build_poster(script, opts=None, voice_dur=0.0):
                               "sub": "一次办对，少跑三趟", "icon": "rocket"}, "找合胜宏", 2.8)
     add("outro", "thanks",
         {"thanks": "感谢观看", "sub": _cut(title, 24), "name": company[:12],
-         "follow": "关注", "items": [{"text": "有疑问评论区问"}]}, "感谢观看", 4.0)
+         "follow": "关注",
+         # items 模板要求至少 2 项
+         "items": [{"text": "有疑问评论区问"}, {"text": "关注不迷路"}]},
+        "感谢观看", 4.0)
 
     # 配音轨必须和成片等长：模板会拒收 AUDIO_CLOCK_MISMATCH。
     # 文案按 4.2 字/秒估出来的时间轴通常比实际配音长，所以：
@@ -1424,6 +1441,108 @@ def _find_review(plan_dir):
     return None
 
 
+def _autofix_poster(params, profile=None):
+    """自检不通过时做最小修补：补齐项数、截断超长文字。
+
+    原则是“尽量保留原意”：优先按标点再切一刀，切不动才补通用承接句。
+    """
+    spec = (profile or {}).get("controls") or {}
+    fillers = {
+        ("steps", "steps"): ["先确认条件", "再按流程办"],
+        ("list", "items"): ["先看第一点", "再看第二点"],
+        ("prosCons", "pros"): ["省时省心"],
+        ("prosCons", "cons"): ["前期要花时间"],
+        ("outro", "items"): [{"text": "有疑问评论区问"}],
+        ("counter", "items"): [],
+    }
+    for s in params.get("segments") or []:
+        ctl = s.get("control")
+        d = spec.get(ctl) or {}
+        pd = d.get("props") or {}
+        props = s.get("props")
+        if not isinstance(props, dict):
+            continue
+        for name, meta in pd.items():
+            if not isinstance(meta, dict):
+                continue
+            val = props.get(name)
+            if val in (None, "", []):
+                if not meta.get("required"):
+                    continue
+                fb = fillers.get((ctl, name))
+                if fb:
+                    props[name] = list(fb)
+                elif meta.get("type") == "string":
+                    src = (s.get("spokenText") or params.get("header", {})
+                           .get("shortTitle") or "内容")
+                    props[name] = str(src)[:int(meta.get("max") or 12)]
+                elif meta.get("type") == "array":
+                    props[name] = ["要点一", "要点二"]
+                continue
+            if isinstance(val, list):
+                mx = meta.get("max")
+                if mx and len(val) > mx:
+                    props[name] = val[:mx]
+                if meta.get("required") and len(props[name]) < 2:
+                    cur = list(props[name])
+                    # outro.items 的元素是 {"text": ...}，其余控件是纯字符串
+                    if ctl == "outro" and name == "items":
+                        extra = [{"text": "关注不迷路"}, {"text": "有疑问随时问"}]
+                    else:
+                        extra = [{"text": "另一点"} if isinstance(cur[0], dict) else "另一点"]
+                        extra = list(fillers.get((ctl, name)) or extra)
+                    for x in extra:
+                        if len(cur) >= 2:
+                            break
+                        if x not in cur:
+                            cur.append(x)
+                    props[name] = cur
+            elif isinstance(val, str):
+                mx = meta.get("max")
+                if mx and len(val) > mx:
+                    props[name] = val[:mx]
+    return params
+
+
+def validate_poster(params, profile=None):
+    """提交前按模板 spec 自检，把“渲染阶段才报”的错提前拦住。
+
+    模板校验器很严：必填字段缺失、数组项数不足都会让整条片子失败，
+    而失败点在 plan/render 阶段，排查一轮要等几分钟。这里先扫一遍。
+    返回问题列表（空列表 = 通过）。
+    """
+    bad = []
+    spec = (profile or {}).get("controls") or {}
+    if not spec:
+        return bad
+    for i, s in enumerate(params.get("segments") or []):
+        ctl = s.get("control")
+        d = spec.get(ctl)
+        if not d:
+            continue
+        props = s.get("props") or {}
+        pd = d.get("props") or {}
+        for name, meta in pd.items():
+            if not isinstance(meta, dict):
+                continue
+            val = props.get(name)
+            if meta.get("required") and (val is None or val == "" or val == []):
+                bad.append("#%d %s 缺少必填项 %s" % (i, ctl, name))
+                continue
+            if val is None:
+                continue
+            mx = meta.get("max")
+            if isinstance(val, str) and mx and len(val) > mx:
+                bad.append("#%d %s.%s 超长 %d>%d" % (i, ctl, name, len(val), mx))
+            elif isinstance(val, list):
+                if mx and len(val) > mx:
+                    bad.append("#%d %s.%s 项数超限 %d>%d" % (i, ctl, name, len(val), mx))
+                # 模板还要求部分数组至少 2 项（steps / list.items / pros / cons）
+                if meta.get("required") and len(val) < 2:
+                    bad.append("#%d %s.%s 至少 2 项，现在 %d 项" % (i, ctl, name, len(val)))
+    return bad
+
+
 def overflow_report(params):
     """按控件单行字宽估算竖屏是否溢出（模板自己的几何检查在预览阶段才给）。
 
@@ -1664,6 +1783,20 @@ def render(job_id, root, log=None):
     warn = overflow_report(params) if poster else []
     if warn:
         log("排版提示（不影响出片，但建议改文案）：" + "；".join(warn[:3]))
+
+    if poster:
+        # 先按模板 spec 自检：必填项、项数下限、字数上限。
+        # 这些问题模板要到 plan/render 才拒，等一轮要几分钟，本地先拦。
+        bad = validate_poster(params, kit.profile)
+        if bad:
+            log("⚠ 编排自检发现问题，正在修正：" + "；".join(bad[:4]))
+            params = _autofix_poster(params, kit.profile)
+            json.dump(params, open(pp, "w", encoding="utf-8"),
+                      ensure_ascii=False, indent=1)
+            left = validate_poster(params, kit.profile)
+            if left:
+                raise KitError("时间轴不符合模板要求：%s" % "；".join(left[:5]))
+            log("自检修正完成")
 
     pv = {}
     for attempt in (1, 2):
