@@ -744,7 +744,8 @@ async function startRender() {
     const opts = {selected, layout:$('motionLayout').value,
                   music_path:$('motionMusic').value.trim()};
     if (mv) { opts.voice = mv; opts.mg_voice = mv; opts.voice_provider = STATE.motiongit ? 'motiongit' : 'edge'; }
-    return launchRender({script_id:+sid, render_mode:'motion', motion_package:pkg, motion_input:opts});
+    return launchRender({script_id:+sid, render_mode:'motion', motion_package:pkg,
+                         video_path: CUR.talkPath || '', motion_input:opts});
   }
 }
 

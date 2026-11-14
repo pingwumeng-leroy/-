@@ -561,7 +561,9 @@ def api_clip_render():
         pkg = d.get("motion_package") or ""
         if not motion.get_package(pkg):
             return err("未找到 MotionGit 模板包「%s」，请先在设置页上传 .motion" % pkg)
-        jid = db.add_job(int(sid), "", tid, render_mode="motion",
+        # 带口播原片就交给模板走口播路线：原声进片、字幕用真实时间、隔段出镜；
+        # 不带就是原来的纯文字路线（TTS 配音）。
+        jid = db.add_job(int(sid), d.get("video_path") or "", tid, render_mode="motion",
                          motion_package=pkg, motion_input=d.get("motion_input", {}))
         motion.start_motion(jid)
     else:

@@ -1843,6 +1843,337 @@ def _shrink_poster(params):
     return params
 
 
+# ----------------------------------------------------------------------------
+# 3.6 口播原声路线：poster-kit + 完整字幕轨 + 出镜窗口
+#
+# 模板把"纯文字"和"真人口播"分成两条路线。native 路线的 brief 需要
+# contentEvidence / ownershipRefs 等未公开结构（试了六种形态都被判
+# Invalid contentEvidence schema），新做的口播官方指引反而是组件路线：
+# 保留原声 + 完整字幕轨 + narrationMap 的 captionBinding=continuous。
+# 所以真人素材这样接：
+#   * 音轨用口播原声（不合成 TTS、不变速、不补静音）
+#   * 字幕和画面切点都用字幕的真实时间，不按字数估
+#   * 每隔十几秒把一屏换成 media 窗口，窗口里放同一时刻的口播画面
+# ----------------------------------------------------------------------------
+def srt_captions(path):
+    """把 SRT 解析成 [{t0,t1,text}]，丢掉空行、校正重叠。"""
+    if not path or not os.path.exists(path):
+        return []
+    txt = open(path, encoding="utf-8", errors="ignore").read()
+    rows, cur = [], {}
+    for line in txt.splitlines():
+        ln = line.strip()
+        if re.match(r"^\d+$", ln) and not cur.get("text"):
+            continue
+        if "-->" in ln:
+            a, b = [x.strip() for x in ln.split("-->")[:2]]
+            cur["t0"] = _srt_sec(a)
+            cur["t1"] = _srt_sec(b)
+            continue
+        if not ln:
+            if cur.get("text") and cur.get("t1", 0) > cur.get("t0", 0):
+                rows.append(cur)
+            cur = {}
+            continue
+        cur["text"] = (cur.get("text", "") + ln).strip()
+    if cur.get("text") and cur.get("t1", 0) > cur.get("t0", 0):
+        rows.append(cur)
+    out = []
+    for r in rows:
+        t = re.sub(r"<[^>]+>", "", r["text"]).strip()
+        t = re.sub(r"\s+", " ", t)
+        if not t:
+            continue
+        if out and r["t0"] < out[-1]["t1"]:
+            r["t0"] = out[-1]["t1"]
+        if r["t1"] - r["t0"] < 0.15:
+            r["t1"] = r["t0"] + 0.15
+        out.append({"t0": round(r["t0"], 3), "t1": round(r["t1"], 3), "text": t})
+    return out
+
+
+def _srt_sec(s):
+    s = s.replace(",", ".")
+    parts = [float(x) for x in s.split(":")]
+    if len(parts) == 3:
+        return parts[0] * 3600 + parts[1] * 60 + parts[2]
+    if len(parts) == 2:
+        return parts[0] * 60 + parts[1]
+    return parts[0]
+
+
+def talk_captions(talk_path, work, srt_path=None, vdur=0.0, log=None):
+    """取口播的真实字幕时间：用户字幕 → 本地 ASR → 按字数估（最后手段）。
+
+    返回 (captions, source)。source 会写进日志，方便事后判断这段是不是真同步。
+    """
+    log = log or (lambda m: None)
+    caps = srt_captions(srt_path) if srt_path else []
+    if len(caps) >= 1:
+        log("已用字幕文件对齐口播：%d 条" % len(caps))
+        return caps, "provided-srt"
+    try:
+        from . import transcript
+        out_dir = os.path.join(work, "asr")
+        os.makedirs(out_dir, exist_ok=True)
+        sp = transcript.transcribe_video(talk_path, out_dir)
+        caps = srt_captions(sp)
+        if len(caps) >= 1:
+            log("已用本地语音识别对齐口播：%d 条" % len(caps))
+            return caps, "asr"
+    except Exception as e:
+        log("⚠ 语音识别不可用（%s）" % str(e)[:120])
+    # 退化：按字数切分整段时长 —— 只能保证总长对，句内仍有偏差
+    body = "".join(c.get("text", "") for c in caps) or ""
+    log("⚠ 没有字幕也没有语音识别，句级时间只能按字数估算，可能仍有错位")
+    return [], "estimate"
+
+
+def build_poster_talk(script, opts, talk_name, caps, vdur, log=None, profile=None):
+    """口播原声版时间轴：段落跟着字幕真实时间，隔一段出镜一次。
+
+    caps 是 [{t0,t1,text}]，允许为空（此时退化成整段一屏，但仍用原声）。
+    """
+    log = log or (lambda m: None)
+    title = (script.get("title") or "").strip() or "企业服务那些事"
+    company = (config.get_settings().get("company", {}) or {}).get("short", "合胜宏企服")
+
+    # 片尾固定 4.5 秒（模板要求 4–6 秒），正文取其余时间
+    outro_d = 4.5 if vdur > 12 else max(4.0, vdur * 0.3)
+    body_end = max(4.0, vdur - outro_d)
+
+    # ---- 1. 正文段落：以字幕边界为切点，收进每屏的 [min,max] ----
+    blocks = []          # [{t0,t1,text}]
+    src = [dict(c) for c in (caps or []) if c["t1"] > c["t0"]]
+    if not src:
+        src = [{"t0": 0.0, "t1": body_end, "text": (script.get("body") or title)}]
+    # 只取正文区间内的部分（跨界的截断，不改字幕本身）
+    for c in src:
+        if c["t1"] <= 0.05:
+            continue
+        if c["t0"] >= body_end - 0.05:
+            continue
+        blocks.append({"t0": max(0.0, c["t0"]), "t1": min(body_end, c["t1"]),
+                       "text": c["text"]})
+    if not blocks:
+        blocks = [{"t0": 0.0, "t1": body_end, "text": title}]
+    blocks[0]["t0"] = 0.0
+    blocks[-1]["t1"] = body_end
+
+    # 片头：第一屏让位给 opener（2.2–3.4 秒），其余内容顺延
+    op_end = min(3.4, max(2.2, min(blocks[0]["t1"], 3.4)))
+    shots = [{"t0": 0.0, "t1": round(op_end, 2), "control": "opener", "variant": "focus",
+              "props": {"title": _cut(title, 9), "a": company[:16], "b": ""},
+              "text": blocks[0]["text"]}]
+
+    # 正文从 op_end 开始，按字幕边界铺满 body_end
+    cuts = [b["t0"] for b in blocks if b["t0"] > op_end + 0.3] + [body_end]
+    cur = op_end
+    while cur < body_end - 0.2:
+        # 该位置属于哪一句（用于选控件和文字）
+        own = next((b for b in blocks if b["t1"] > cur + 0.05), blocks[-1])
+        ctl = _pick(own["text"], POSTER_RULES)
+        lo = POSTER_MIN.get(ctl, POSTER_MIN_DEFAULT)
+        hi = poster_max(ctl)
+        # 候选切点：所有字幕边界 + 逐秒网格，取最长的合法区间
+        cand = [c for c in cuts if cur + lo - 0.05 <= c <= cur + hi + 0.05]
+        if cand:
+            end = max(cand)
+        else:
+            end = min(body_end, cur + min(hi, max(lo, 3.5)))
+        # 太短就吞并下一句，绝不出现 1 秒屏
+        if end - cur < lo:
+            end = min(body_end, cur + lo)
+        if end - cur > hi:
+            end = cur + hi
+        # 尾巴不够一屏时必须处理：片尾还有余量就借，没有就提前收尾
+        if end - cur < lo - 0.02:
+            if vdur - cur <= 6.0:
+                body_end = cur
+                break
+            end = min(cur + lo, cur + hi)
+        seg_text = "".join(b["text"] for b in blocks
+                           if b["t1"] > cur + 0.05 and b["t0"] < end - 0.05)[:120]
+        shots.append({"t0": round(cur, 2), "t1": round(end, 2),
+                      "control": ctl, "variant": DEFAULT_VARIANT.get(ctl, "focus"),
+                      "props": _poster_props(ctl, seg_text, title, company, opts),
+                      "text": seg_text or own["text"]})
+        cur = round(end, 2)
+
+    # 同一控件连着出现就换变体，否则整片像一张卡停很多次
+    seen = {}
+    for sg in shots:
+        c = sg["control"]
+        if c in ("opener", "outro", "media"):
+            continue
+        vs = (((profile or {}).get("controls") or {}).get(c) or {}).get("variants") or []
+        if not vs:
+            continue
+        n = seen.get(c, 0)
+        sg["variant"] = vs[n % len(vs)]
+        seen[c] = n + 1
+
+    # ---- 2. 出镜区间：模板渲染器不把 <video> 烧进成片（预览有、成片空白），
+    # 所以这里只记时间段，出片后由 ffmpeg 把口播画面叠上去（同一时钟，天然同步）。
+    OUT_GAP, OUT_HOLD = 14.0, 3.5
+    over, last_out = [], -99.0
+    for sg in shots[1:]:
+        if sg["t1"] - sg["t0"] < 3.2:
+            continue
+        if sg["t0"] - last_out < OUT_GAP:
+            continue
+        over.append([round(sg["t0"] + 0.15, 2),
+                     round(min(sg["t0"] + 0.15 + OUT_HOLD, sg["t1"] - 0.1), 2)])
+        last_out = sg["t0"]
+
+    # 正文最后一段必须正好收在 body_end：多出来的并回前一段，短了就别越界
+    if len(shots) > 1 and abs(shots[-1]["t1"] - body_end) > 0.01:
+        last = shots[-1]
+        if body_end - last["t0"] >= POSTER_MIN.get(last["control"], POSTER_MIN_DEFAULT):
+            last["t1"] = round(body_end, 2)
+        else:
+            shots.pop()
+            shots[-1]["t1"] = round(body_end, 2)
+
+    # ---- 3. 片尾 ----
+    shots.append({"t0": round(body_end, 2), "t1": round(vdur, 2),
+                  "control": "outro", "variant": "thanks",
+                  "props": {"thanks": "感谢观看", "sub": _cut(title, 24),
+                            "name": company[:12], "follow": "关注",
+                            "items": [{"text": "有疑问评论区问"}, {"text": "关注不迷路"}]},
+                  "text": "感谢观看"})
+
+    timeline = {
+        "duration": round(vdur, 2),
+        "layout": "portrait",
+        "language": "zh",
+        "segments": [{k: v for k, v in s.items() if k != "text"} for s in shots],
+        "presenter": {"hide": True, "audio": "mute"},
+        "voiceover": opts.get("voiceover_name") or "",
+        "music": opts.get("music", "") or "",
+        "header": {"shortTitle": title[:2000],
+                   "source": {"kind": "user-explicit", "field": "title"}},
+        "showCaptions": bool(opts.get("captions", True)),
+        "hud": False,
+        "narrationLayout": "balanced",
+        "narrationCardLayout": "balanced",
+        "captionSafeArea": "short-video",
+        "captionPosition": {"bottomRatio": 0.2, "leftRatio": 0.08, "rightRatio": 0.1},
+        "ending": "cut",
+    }
+    timeline["talkOverlay"] = {"file": talk_name, "ranges": over}
+    if caps:
+        timeline["captions"] = [{"t0": c["t0"], "t1": c["t1"], "text": c["text"]}
+                                for c in caps]
+        timeline["narrationMap"] = _narration_rows(shots, timeline["captions"])
+    return timeline
+
+
+def _poster_props(ctl, text, title, company, opts):
+    """按控件给一份能过校验的最小 props（口播路线专用，内容取自该屏原文）。"""
+    t = _cut(text, 44) or _cut(title, 20)
+    if ctl == "myth":
+        cl = [x.strip("，,。；; ") for x in re.split(r"[，,。；;]", t) if x.strip()]
+        a = cl[0] if cl else t
+        b = cl[1] if len(cl) > 1 else "先看清条款再定"
+        return {"kicker": "很多人以为是", "myth": _cut(a, 22), "fact": _cut(b, 24),
+                "mythLabel": "误区", "factLabel": "其实"}
+    if ctl == "tip":
+        return {"kicker": "提醒", "kind": "warn", "title": "注意", "text": t}
+    if ctl == "list":
+        items = [_cut(x, 24) for x in _split_phrase(t, 12) if x][:4]
+        if len(items) < 2:
+            items = [items[0] if items else _cut(t, 12), "再看这一点"]
+        return {"title": _cut(title, 18), "items": items[:6]}
+    if ctl == "steps":
+        its = [_cut(x, 10) for x in _split_phrase(t, 10) if x][:5]
+        if len(its) < 2:
+            its = [_cut(t, 10), "再按流程办"]
+        return {"title": "怎么做"[:18], "steps": its}
+    if ctl == "compare":
+        cl = [x.strip() for x in re.split(r"[，,。；;]", t) if x.strip()]
+        return {"left": {"label": "常见做法", "big": _cut(cl[0], 10) if cl else _cut(t, 10),
+                         "lines": []},
+                "right": {"label": "更稳的做法",
+                          "big": _cut(cl[-1], 10) if len(cl) > 1 else "更稳妥的做法",
+                          "lines": []},
+                "verdict": "后者更稳", "winner": "right"}
+    if ctl == "definition":
+        return {"kicker": "先把词搞懂", "term": _cut(t, 10), "pos": "名词",
+                "definition": _cut(t, 48)}
+    if ctl == "cta":
+        return {"kicker": "办企业不用自己摸", "text": "找合胜宏", "sub": "一次办对，少跑三趟",
+                "icon": "rocket"}
+    if ctl == "quote":
+        return {"text": _cut(t, 40), "who": company[:12]}
+    if ctl == "qa":
+        q = _cut(t, 26).rstrip("。！？!?") + "？"
+        return {"kicker": "常被问到", "question": q, "answer": _cut(title, 20)}
+    # 默认用巨字/标题：竖屏最稳，不会因为字段缺失被拒
+    if ctl in ("keyword", "bigtype", "kinetic"):
+        parts = [x for x in _split_phrase(t, 12) if x]
+        return {"kicker": title[:32], "word": _cut(parts[0] if parts else t, 10),
+                "sub": [_cut(x, 22) for x in parts[1:3]]}
+    return {"kicker": _cut(title, 20), "line1": _cut(t, 16), "line2": ""}
+
+
+def _narration_rows(shots, caps):
+    """narrationMap：每屏一行，captionIndices 取该屏相交的全部字幕。
+
+    模板的 continuous 模式要求：beat 保留整句的原文和真实区间（可以跨镜头），
+    每一条相交的字幕都要有自己的 beat，不能只标几个词。
+    """
+    rows = []
+    for k, sg in enumerate(shots):
+        idx = [i for i, c in enumerate(caps)
+               if c["t0"] < sg["t1"] - 0.01 and c["t1"] > sg["t0"] + 0.01]
+        if not idx:
+            mid = (sg["t0"] + sg["t1"]) / 2.0
+            idx = [min(range(len(caps)),
+                       key=lambda i: abs((caps[i]["t0"] + caps[i]["t1"]) / 2.0 - mid))]
+        rows.append({
+            "shot": k, "start": round(sg["t0"], 2), "end": round(sg["t1"], 2),
+            "spokenText": "".join(caps[i]["text"] for i in idx)[:200],
+            "purpose": "neutral-emphasis",
+            "timingSource": "provided-captions",
+            "captionIndices": idx,
+            "captionBinding": "continuous",
+            "beats": [{"at": round(caps[i]["t0"], 2), "until": round(caps[i]["t1"], 2),
+                       "spokenText": caps[i]["text"][:200],
+                       "timing": "sentence", "target": "props"} for i in idx],
+        })
+    return rows
+
+
+def _overlay_talk(film, talk, ranges, out_path, log=None):
+    """把口播画面叠到成片上（模板自己的 <video> 不进成片，只能二次合成）。
+
+    口播输入从头播放，主片和素材用同一个时间基准，所以窗口里那一帧
+    天然等于这一刻的说话内容；不要给素材加 -ss，加了就错位。
+    """
+    log = log or (lambda m: None)
+    if not ranges:
+        return film
+    cond = "+".join("between(t,%.2f,%.2f)" % (a, b) for a, b in ranges)
+    w = 960
+    vf = ("[1:v]scale=%d:-2,crop=%d:%d:(iw-%d)/2:180,setsar=1,"
+          "pad=%d:%d:4:4:color=white[pip];"
+          "[0:v][pip]overlay=60:900:enable='%s'[v]"
+          % (w, w, w, w, w + 8, w + 8, cond))
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+           "-i", film, "-stream_loop", "-1", "-i", talk,
+           "-filter_complex", vf, "-map", "[v]", "-map", "0:a",
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+           "-pix_fmt", "yuv420p", "-c:a", "copy", "-shortest", out_path]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+    if r.returncode != 0 or not os.path.exists(out_path) \
+            or os.path.getsize(out_path) < 10000:
+        log("⚠ 口播画面叠加失败，交付纯文字版：%s" % (r.stderr or "")[-300:])
+        return film
+    log("口播画面已叠加：%d 段" % len(ranges))
+    return out_path
+
+
 def render(job_id, root, log=None):
     """后台任务主体：kit 包全链路出片。返回 (out_path, duration, params)。"""
     from . import ingest
@@ -1900,10 +2231,49 @@ def render(job_id, root, log=None):
     if poster:
         voice_dur = 0.0
         voice_path = None
-        # 配音：前端只传了音色名（voice / mg_voice），音频要在这里合成。
-        # motion-kit 那条路线跳过了 motion.render_motion 里的配音环节，
-        # 不在这补就会变成无声片，时长只能被模板下限硬撑。
-        if not opts.get("voiceover") and (opts.get("voice") or opts.get("mg_voice")):
+        talk_mode = False
+        # 有真人原片就走口播路线：原声当音轨、字幕/切点用真实时间、隔段出镜。
+        # 这条分支不再合成任何配音，也不补静音、不拉伸。
+        talk = (opts.get("talk_path") or job.get("video_path") or "").strip()
+        if talk and os.path.exists(talk):
+            tname = "talk" + (os.path.splitext(talk)[1] or ".mp4").lower()
+            kit.put_input(tname, src=talk)
+            talk_in = os.path.join(inputs, tname)
+            # 模板按“timeline 同目录”找素材，实例根也放一份，少走一次兜底重试
+            try:
+                shutil.copy2(talk_in, os.path.join(base, tname))
+            except Exception:
+                pass
+            try:
+                talk_dur = ingest.probe(talk_in)[0]
+            except Exception:
+                talk_dur = 0.0
+            if talk_dur <= 0:
+                raise KitError("读不到口播视频时长：%s" % os.path.basename(talk))
+            # 原声：直接从视频抽，不改语速、不重排、不补静音
+            vname = "talkvoice.m4a"
+            vpath = os.path.join(work, vname)
+            subprocess.run(
+                ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", talk_in,
+                 "-vn", "-ac", "2", "-ar", "48000", "-c:a", "aac", "-b:a", "192k", vpath],
+                check=True, timeout=600)
+            voice_path = kit.put_input(vname, src=vpath)
+            try:
+                shutil.copy2(voice_path, os.path.join(base, vname))
+            except Exception:
+                pass
+            talk_mode = True
+            voice_dur = talk_dur
+            log("口播原声 %.2fs（不合成配音、不变速）" % talk_dur)
+            caps, cap_src = talk_captions(talk_in, work, opts.get("srt_path"),
+                                          talk_dur, log)
+            timeline = build_poster_talk(script, opts, tname, caps, talk_dur, log,
+                                        kit.profile)
+            # 出镜区间的视频由 ffmpeg 在成片阶段叠加（见 _overlay_talk）
+            timeline["voiceover"] = vname
+            log("对时依据：%s，共 %d 段" % (cap_src, len(timeline["segments"])))
+        # 没有原片：仍走 TTS + 文案估时（旧行为）
+        elif not opts.get("voiceover") and (opts.get("voice") or opts.get("mg_voice")):
             vp = os.path.join(work, "voice.mp3")
             try:
                 from . import motion as _motion
@@ -1928,7 +2298,9 @@ def render(job_id, root, log=None):
             else:
                 log("⚠ 找不到配音文件 %s，按无配音出片" % os.path.basename(vname))
                 opts["voiceover"] = ""
-        if voice_path and voice_dur > 0:
+        if talk_mode:
+            pass            # 口播路线的时间轴已经在上面建好，不能再被 TTS 逻辑覆盖
+        elif voice_path and voice_dur > 0:
             # 走精确对齐：文案句子 ⇄ 配音时长 ⇄ 字幕 ⇄ narrationMap 四者同一时钟
             timeline = build_poster(script, opts, voice_dur)
             timeline = bind_poster_audio(script, opts, timeline, inputs, voice_path, log)
@@ -1944,9 +2316,12 @@ def render(job_id, root, log=None):
             elif opts.get("captions", True):
                 kit.put_input("captions.srt", text=build_srt(script, opts, timeline, 0))
         pp = os.path.join(base, "timeline.json")
+        overlay = timeline.pop("talkOverlay", None)
         json.dump(timeline, open(pp, "w", encoding="utf-8"),
                   ensure_ascii=False, indent=1)
         params = timeline
+        if overlay:
+            params["talkOverlay"] = overlay
         n = len(timeline["segments"])
         kinds = sorted({s["control"] for s in timeline["segments"]})
         log("已编排 %d 个镜头 / %d 种版式（%s）/ 总长 %.1fs" %
@@ -2086,6 +2461,16 @@ def render(job_id, root, log=None):
             raise last
     if not os.path.exists(out_raw) or os.path.getsize(out_raw) < 10000:
         raise KitError("模板未产出有效视频")
+
+    # 口播路线：模板出的是纯文字版，人物画面在这里叠上去
+    ov = (params or {}).get("talkOverlay") or {}
+    if ov.get("ranges"):
+        tfile = os.path.join(kit.instance, "inputs", ov.get("file") or "")
+        if not os.path.exists(tfile):
+            tfile = os.path.join(work, ov.get("file") or "")
+        if os.path.exists(tfile):
+            merged = os.path.join(work, "final.mp4")
+            out_raw = _overlay_talk(out_raw, tfile, ov["ranges"], merged, log)
     db.update_job(job_id, progress=96)
 
     name = "clip_%d_kit.mp4" % job_id
