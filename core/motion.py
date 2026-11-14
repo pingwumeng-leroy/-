@@ -249,15 +249,21 @@ def list_packages():
     out = []
     for n in sorted(os.listdir(MOTION_DIR)):
         root = os.path.join(MOTION_DIR, n)
-        if os.path.isdir(root) and not n.startswith("."):
-            try:
-                pkg = MotionPackage(n, root)
-                meta = pkg.meta
-                meta["missing"] = pkg.missing_files()
-                meta["complete"] = not meta["missing"]
-                out.append(meta)
-            except Exception as e:
-                out.append({"name": n, "error": str(e)})
+        # 只认真正的模板包：目录里有 motion.json。
+        # 依赖缓存（_kitcache）、渲染工作目录（_work）也建在这一层，
+        # 光靠“跳过点开头的目录”会把它们当模板去探测，拖慢设置页。
+        if not os.path.isdir(root) or n.startswith((".", "_")):
+            continue
+        if not os.path.exists(os.path.join(root, "motion.json")):
+            continue
+        try:
+            pkg = MotionPackage(n, root)
+            meta = pkg.meta
+            meta["missing"] = pkg.missing_files()
+            meta["complete"] = not meta["missing"]
+            out.append(meta)
+        except Exception as e:
+            out.append({"name": n, "error": str(e)})
     return out
 
 
