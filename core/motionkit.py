@@ -266,6 +266,36 @@ class KitError(RuntimeError):
     pass
 
 
+def _harvest_checker(text, ctx=10, max_blocks=4):
+    """从助手报错里找出渲染器源码位置，打印上下文（只读、不改任何文件）。
+
+    校验规则藏在渲染运行时里（例如 render.mjs:197 的 NARRATION_CONTINUITY），
+    报错栈会给出文件路径和行号；这里把那些行附近的代码摘出来进日志，
+    下次失败不用再登录服务器翻临时目录。
+    """
+    import glob
+    out = []
+    pats = re.findall(r"(file://)?(/tmp/[^\s:()]+?\.(?:mjs|js)):(\d+)(?::\d+)?", text or "")
+    seen = set()
+    for _, path, line in pats:
+        if path in seen or len(out) >= max_blocks:
+            continue
+        seen.add(path)
+        if not os.path.exists(path):
+            continue
+        try:
+            src = open(path, encoding="utf-8", errors="ignore").read().splitlines()
+        except Exception:
+            continue
+        ln = int(line)
+        a = max(1, ln - ctx)
+        b = min(len(src), ln + ctx)
+        out.append("—— 校验器源码 %s:%d ——" % (os.path.basename(path), ln))
+        for i in range(a, b + 1):
+            out.append("%4d| %s" % (i, src[i - 1][:200]))
+    return out
+
+
 class Kit:
     def __init__(self, root, workdir, log=None):
         self.root = root
@@ -351,6 +381,13 @@ class Kit:
                     err = (p.stderr or "").strip()
         if check and p.returncode != 0:
             msg = (err or out or "助手执行失败")[-1200:]
+            # 顺手把校验器的源码片段留在日志里：这些报错来自渲染运行时内部
+            # （render.mjs / page/vivid.js），仓库里没有源码，只能运行时捞。
+            try:
+                for line in _harvest_checker(err + "\n" + out):
+                    self.log(line)
+            except Exception:
+                pass
             raise KitError("%s\n%s" % (args[0] if args else "helper", msg))
         return out, err, p.returncode
 
