@@ -77,12 +77,14 @@ motion-kit / poster-kit 包的要点：
 | 时间轴骨架 | `{workflow, header, timeline:{…}}` | 时间轴本体在顶层，必填 `duration / segments / voiceover / music / presenter` |
 | 渲染 | `render <project> --out` | `render --workflow poster-kit --timeline @vault --plan <dir> --preview-review <dir> --out` |
 
-poster-kit 的校验器有四道硬关卡，任一不过直接拒：
+poster-kit 的校验器有几道硬关卡，任一不过直接拒：
 
 1. **最短时长**：每个控件有 `minDur`（`steps 3.5`、`definition/compare/outro 4`、`list/tip 3`、`opener 2`…），低于就报 `时间轴不合格`。
 2. **音频时钟**：`AUDIO_CLOCK_MISMATCH` —— 成片总时长必须等于配音时长（±0.02s）。配音比模板下限短时，工作台会补尾部静音并把最后一条字幕拉长。
 3. **无空洞**：`RECOMPOSE_REQUIRED` —— 段与段不能重叠、不能留缝，末段必须正好到 `duration`。
 4. **旁白归属**：`narrationMap` 必须**每个镜头一行、按输出顺序**，且每个镜头都有 `spokenText`（`ALIGNMENT_REQUIRED`）。
+5. **旁白连续**：`NARRATION_CONTINUITY` —— `captionIndices` 必须是**覆盖整屏的连续一组**字幕（首尾相接盖满 `[t0,t1]`），只挑「相交」的会因贴边和短句漏项而盖不满。
+6. **字幕两行**：单条字幕超两行，渲染器直接抛 `Caption exceeds two explicit lines`（预览阶段才炸，本地 `check-params` 查不出）。工作台把每条字幕压在 20 字宽内（中文计 1、ASCII 计 0.55），按标点优先切句、时间按字数比例分配。
 
 所以竖屏出片的时长不是「文案多长就多长」，而是「配音时长 ⇄ 镜头时长 ⇄ 字幕 ⇄ narrationMap 四者同一时钟」，由 `bind_poster_audio()` 一次算齐；配音太短塞不满模板下限时，宁可整体放慢 + 补尾静音，也不让画面被砍。
 
