@@ -888,10 +888,22 @@ def _fit_segments(segs, target):
 
 
 def _srt_time(sec):
-    h = int(sec // 3600)
-    m = int(sec % 3600 // 60)
-    s = sec % 60
-    return ("%02d:%02d:%06.3f" % (h, m, s)).replace(".", ",")
+    """秒 → SRT 时间戳。先按毫秒取整再拆分，避免 59.9996 写成 00:01:60.000。"""
+    ms = int(round(float(sec) * 1000))
+    h, ms = divmod(ms, 3600000)
+    m, ms = divmod(ms, 60000)
+    s, ms = divmod(ms, 1000)
+    return "%02d:%02d:%02d,%03d" % (h, m, s, ms)
+
+
+def _captions_srt(caps):
+    """把 timeline.captions 原样写成 SRT（时间只按 2 位，与镜头同一套）。"""
+    out = []
+    for i, c in enumerate(caps or []):
+        out.append("%d\n%s --> %s\n%s\n" %
+                   (i + 1, _srt_time(round(c["t0"], 2)), _srt_time(round(c["t1"], 2)),
+                    c["text"]))
+    return "\n".join(out)
 
 
 def build_srt(script, opts, params, voice_dur=0.0):
@@ -2608,17 +2620,26 @@ def _resync_captions_to_shots(shots, caps, log=None):
         return caps
     edges = sorted({round(s["t0"], 2) for s in shots} | {round(s["t1"], 2) for s in shots})
     n_before = len(caps)
-    prev = 0.0
     fixed = 0
     for i, c in enumerate(caps):
         if i > 0:
             e = min(edges, key=lambda x: abs(x - c["t0"]))
-            if 0.001 < abs(e - c["t0"]) <= 0.12:
+            want = min(0.25, max(0.12, (c["t1"] - c["t0"]) * 0.25))
+            nxt = round(caps[i + 1]["t1"], 2) if i + 1 < len(caps) else c["t1"]
+            if 0.001 < abs(e - c["t0"]) <= want:
                 prev_end = round(caps[i - 1]["t1"], 2)
-                nxt_end = round(caps[i + 1]["t1"], 2) if i + 1 < len(caps) else c["t1"]
-                if e - prev_end > 0.3 and nxt_end - e > 0.3:
+                if e - prev_end > 0.3 and nxt - e > 0.3:
                     c["t0"] = e
                     caps[i - 1]["t1"] = e
+                    fixed += 1
+        if i < len(caps) - 1:
+            e = min(edges, key=lambda x: abs(x - c["t1"]))
+            want = min(0.25, max(0.12, (c["t1"] - c["t0"]) * 0.25))
+            if 0.001 < abs(e - c["t1"]) <= want:
+                nxt_end = round(caps[i + 1]["t1"], 2)
+                if e - round(c["t0"], 2) > 0.3 and nxt_end - e > 0.3:
+                    c["t1"] = e
+                    caps[i + 1]["t0"] = e
                     fixed += 1
     if fixed:
         log("已把 %d 条字幕边界对齐到镜头切点（字幕与镜头同一时钟）" % fixed)
@@ -2844,7 +2865,10 @@ def render(job_id, root, log=None):
             opts[key] = name
             log("已绑定%s：%s" % ("配乐" if key == "music" else "配音",
                                 os.path.basename(src)))
-    if opts.get("srt_path") and os.path.exists(opts["srt_path"]):
+    # 字幕先不挂：口播路线要等时间轴定稿后由 captions 反写 SRT，
+    # 否则用户原始 SRT（3 位毫秒、可能整段一句）会和 narrationMap 对不上。
+    if opts.get("srt_path") and os.path.exists(opts["srt_path"]) \
+            and not opts.get("_talk_pending_srt"):
         kit.put_input("captions.srt", src=opts["srt_path"])
         log("已绑定字幕文件")
     opts.setdefault("music", "")
@@ -2865,6 +2889,8 @@ def render(job_id, root, log=None):
             tname = "talk" + (os.path.splitext(talk)[1] or ".mp4").lower()
             kit.put_input(tname, src=talk)
             talk_in = os.path.join(inputs, tname)
+            # 口播路线的字幕要等时间轴定稿后反写，先不挂用户原始 SRT
+            opts["_talk_pending_srt"] = True
             # 模板按“timeline 同目录”找素材，实例根也放一份，少走一次兜底重试
             try:
                 shutil.copy2(talk_in, os.path.join(base, tname))
@@ -2908,6 +2934,11 @@ def render(job_id, root, log=None):
                 if left:
                     raise KitError("口播时间轴不符合模板要求：%s" % "；".join(left[:4]))
             log("对时依据：%s，共 %d 段" % (cap_src, len(timeline["segments"])))
+            # 字幕文件按最终时间轴（已对齐镜头切点）反写，保证模型看到的
+            # captions.srt 与 narrationMap.captionIndices 指同一套边界。
+            if timeline.get("captions"):
+                kit.put_input("captions.srt", text=_captions_srt(timeline["captions"]))
+                log("已按时间轴反写字幕文件（%d 条）" % len(timeline["captions"]))
         # 没有原片：仍走 TTS + 文案估时（旧行为）
         elif not opts.get("voiceover") and (opts.get("voice") or opts.get("mg_voice")):
             vp = os.path.join(work, "voice.mp3")
