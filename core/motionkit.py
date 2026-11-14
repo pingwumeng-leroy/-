@@ -977,15 +977,33 @@ def _cut(s, n=24):
     return s[:n]
 
 
+_PHRASE_BREAK = set("，,、；;：:。！？!? ")
+
+
 def _split_phrase(s, n):
-    """把一句话拆成不超过 n 字的若干行，优先在标点/连接词处断。"""
+    """把一句话拆成不超过 n 字的若干行，优先在标点/空格处断，其次在虚词后断。
+
+    不按“正好 n 个字”生切，否则会出现「别漏小 / 额和手续费」这种把词劈开的副标题。
+    """
     s = _cut(s, 999)
     if len(s) <= n:
         return [s] if s else []
+    soft = set("的了是在和与就都也还要把让给对从为以而则但所")  # 虚词处断开还算自然
     out, buf = [], ""
-    for ch in s:
+    for i, ch in enumerate(s):
         buf += ch
-        if ch in "，,、；;：:" or len(buf) >= n:
+        if ch in _PHRASE_BREAK:
+            out.append(_cut(buf, n))
+            buf = ""
+        elif len(buf) >= n:
+            # 往后找一个更像边界的位置收（≤n+3 内），找不到就硬切
+            tail = s[i + 1:i + 4]
+            k = next((j for j, c in enumerate(tail) if c in _PHRASE_BREAK or c in soft), -1)
+            if k >= 0:
+                continue
+            out.append(_cut(buf, n))
+            buf = ""
+        elif len(buf) == n - 1 and ch in soft:
             out.append(_cut(buf, n))
             buf = ""
     if buf:
@@ -2201,9 +2219,17 @@ def build_poster_talk(script, opts, talk_name, caps, vdur, log=None, profile=Non
             end = min(cur + lo, cur + hi)
         seg_text = "".join(b["text"] for b in blocks
                            if b["t1"] > cur + 0.05 and b["t0"] < end - 0.05)[:120]
+        # 同一句话被切成两屏时，第二屏不要再把整句印一遍：
+        # 取这句话里“还没上过屏”的那一段，避免整片看起来像同一张卡停很久。
+        piece = seg_text or own["text"]
+        prev_text = shots[-1].get("text", "") if shots else ""
+        if prev_text and prev_text in piece:
+            piece = piece.replace(prev_text, "", 1).strip("，,。；;：:、 ")
+        if len(piece) < 4:
+            piece = seg_text or own["text"]
         shots.append({"t0": round(cur, 2), "t1": round(end, 2),
                       "control": ctl, "variant": DEFAULT_VARIANT.get(ctl, "focus"),
-                      "props": _poster_props(ctl, seg_text, title, company, opts),
+                      "props": _poster_props(ctl, piece, title, company, opts),
                       "text": seg_text or own["text"]})
         cur = round(end, 2)
 
@@ -2643,8 +2669,13 @@ def _poster_props(ctl, text, title, company, opts):
         return {"kicker": "常被问到", "question": q, "answer": _cut(title, 20)}
     # 默认用巨字/标题：竖屏最稳，不会因为字段缺失被拒
     if ctl in ("keyword", "bigtype", "kinetic"):
-        parts = [x for x in _split_phrase(t, 12) if x]
-        return {"kicker": title[:32], "word": _cut(parts[0] if parts else t, 10),
+        # 巨字在 1080 宽里可用区约 960px，常规字号下最多 8 个汉字（9 字压边、
+        # 10 字必然越过安全区）。所以主词只取 6~8 字的一段，其余进副标题。
+        parts = [x for x in _split_phrase(t, 8) if x]
+        head = parts[0] if parts else _cut(t, 8)
+        if _cap_width(head) > 8:
+            head = _cut_caption(head, 8)[0]
+        return {"kicker": title[:32], "word": _cut(head, 8),
                 "sub": [_cut(x, 22) for x in parts[1:3]]}
     return {"kicker": _cut(title, 20), "line1": _cut(t, 16), "line2": ""}
 
