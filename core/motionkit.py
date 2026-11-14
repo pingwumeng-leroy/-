@@ -2537,19 +2537,40 @@ def _poster_props(ctl, text, title, company, opts):
 
 
 def _narration_rows(shots, caps):
-    """narrationMap：每屏一行，captionIndices 取该屏相交的全部字幕。
+    """narrationMap：每屏一行，captionIndices 必须是「完整覆盖」的那一组字幕。
 
-    模板的 continuous 模式要求：beat 保留整句的原文和真实区间（可以跨镜头），
-    每一条相交的字幕都要有自己的 beat，不能只标几个词。
+    模板校验器（NARRATION_CONTINUITY）的判据是：captionIndices 圈定的这些字幕
+    连起来（首尾相接）要完整盖住本屏的 [t0,t1]，外扩也不能圈进别的句子。
+    只取「相交」是不够的：字幕末尾 18.90、本屏起点 18.90 这种贴边关系，
+    按相交判会被漏掉，圈定区间就盖不满镜头，直接报
+    captionIndices must include exactly the complete cues intersecting this visual shot。
+
+    另外圈定必须连续：中间跳一条不选，同样会“盖不满”。
+    所以这里从相交的最近一条开始，往两边只按连续下标扩张，直到覆盖整屏。
     """
     rows = []
+    n = len(caps)
+    if n == 0:
+        return rows
     for k, sg in enumerate(shots):
+        s0, s1 = float(sg["t0"]), float(sg["t1"])
         idx = [i for i, c in enumerate(caps)
-               if c["t0"] < sg["t1"] - 0.01 and c["t1"] > sg["t0"] + 0.01]
+               if c["t0"] < s1 - 0.001 and c["t1"] > s0 + 0.001]
         if not idx:
-            mid = (sg["t0"] + sg["t1"]) / 2.0
-            idx = [min(range(len(caps)),
-                       key=lambda i: abs((caps[i]["t0"] + caps[i]["t1"]) / 2.0 - mid))]
+            mid = (s0 + s1) / 2.0
+            idx = [min(range(n), key=lambda i: abs((caps[i]["t0"] + caps[i]["t1"]) / 2.0 - mid))]
+        a, b = min(idx), max(idx)
+        # 左侧：还有比 s0 更早结束、且与本屏相接的字幕就继续吃进来
+        while a > 0 and caps[a - 1]["t1"] >= s0 and caps[a]["t0"] - caps[a - 1]["t1"] < 0.02:
+            a -= 1
+        # 右侧：本屏还没被盖满就往下一条吃，吃掉的字幕起点不得晚于 s1
+        # （否则圈定了本屏根本没在说的句子）。末屏贴片尾时允许吃到字幕末尾。
+        last_shot = k == len(shots) - 1
+        while b < n - 1 and caps[b]["t1"] < s1 - 0.001:
+            if not last_shot and caps[b + 1]["t0"] > s1 + 0.001:
+                break
+            b += 1
+        idx = list(range(a, b + 1))
         rows.append({
             "shot": k, "start": round(sg["t0"], 2), "end": round(sg["t1"], 2),
             "spokenText": "".join(caps[i]["text"] for i in idx)[:200],
